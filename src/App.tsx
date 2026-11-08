@@ -123,6 +123,9 @@ import {
   canCreateOrAssignTasks,
   dueDateInputToIso,
   toLocalDateKey,
+  toJakartaDateKey,
+  formatJakartaTimeHHMM,
+  formatAttendanceCheckInHHMM,
   getAttendanceJobDescription,
   mapSupabaseAttendanceRowToRecord,
   SPLASH_DURATION_MS,
@@ -691,7 +694,119 @@ export default function App() {
     }
   };
 
+  // Fetch Attendance records from Supabase `attendance` table (100% Single Source of Truth across devices: HP & Laptop)
+  const fetchAttendanceFromSupabase = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('*')
+        .order('check_in_time', { ascending: false });
+
+      if (error || !Array.isArray(data)) {
+        return;
+      }
+
+      const rows = data as SupabaseAttendanceRow[];
+      const mappedLogs = rows.map((row) =>
+        mapSupabaseAttendanceRowToRecord(row, staffList)
+      );
+
+      // Build active today's attendance map (where check_in_time is today in WIB and clock_out_time is null)
+      const nextActiveByEmail: Record<string, SupabaseAttendanceRow> = {};
+      for (const row of rows) {
+        const emailKey = (row.email || '').trim().toLowerCase();
+        if (!emailKey) continue;
+        if (
+          !(emailKey in nextActiveByEmail) &&
+          isAttendanceRowActiveForToday(row)
+        ) {
+          nextActiveByEmail[emailKey] = row;
+        }
+      }
+
+      setActiveAttendanceByEmail(nextActiveByEmail);
+
+      setAttendanceLogs((prev) => {
+        if (mappedLogs.length === 0 && prev.length > 0) {
+          return prev;
+        }
+        return mappedLogs;
+      });
+
+      // Synchronize the logged-in user's today check-in state across devices (HP & Laptop)
+      const currentUserEmail = (
+        currentUserProfile?.email ||
+        currentUser?.email ||
+        loginEmail ||
+        ''
+      )
+        .trim()
+        .toLowerCase();
+
+      if (currentUserEmail) {
+        const myActiveRow = nextActiveByEmail[currentUserEmail];
+        if (myActiveRow) {
+          const activeMode: 'WFO' | 'WFE' =
+            String(myActiveRow.mode || '').toUpperCase() === 'WFE'
+              ? 'WFE'
+              : 'WFO';
+          const checkInWib = formatAttendanceCheckInHHMM(
+            myActiveRow.check_in_time
+          );
+          const photoUrl = myActiveRow.photo_url || '';
+
+          setSelectedWorkMode(activeMode);
+          setCheckInInputTime(checkInWib);
+          setIsPresent(activeMode === 'WFO');
+          if (photoUrl) {
+            setCapturedPhotoUrl(photoUrl);
+          }
+          if (myActiveRow.id !== undefined && myActiveRow.id !== null) {
+            setPendingCheckOutLogId(String(myActiveRow.id));
+          }
+          setCheckInSuccessData({
+            email: currentUserEmail,
+            mode: activeMode,
+            checkInTimeIso:
+              myActiveRow.check_in_time || new Date().toISOString(),
+            checkInTimeWib: checkInWib,
+            photoUrl,
+          });
+        } else {
+          // Check if user has already completed (clocked out) an attendance session today in Supabase
+          const todayWib = toJakartaDateKey(new Date());
+          const myTodayCompleted = mappedLogs.find(
+            (l) =>
+              (l.email || '').trim().toLowerCase() === currentUserEmail &&
+              l.date === todayWib &&
+              l.status === 'completed'
+          );
+          if (myTodayCompleted) {
+            setCheckInSuccessData(null);
+            setIsPresent(false);
+            if (myTodayCompleted.photoDataUrl) {
+              setCapturedPhotoUrl(myTodayCompleted.photoDataUrl);
+            }
+          } else if (rows.length > 0) {
+            setCheckInSuccessData(null);
+            setIsPresent(false);
+          }
+        }
+      }
+    } catch {
+      // Preserve current state if offline
+    }
+  };
+
   useEffect(() => {
+    if (
+      isAuthenticated ||
+      activeTab === 'home' ||
+      activeTab === 'attendance' ||
+      activeTab === 'team_attendance'
+    ) {
+      fetchAttendanceFromSupabase();
+    }
     if (isAuthenticated || activeTab === 'pettycash') {
       fetchPettyCashMasterDetailFromSupabase();
     }
@@ -709,7 +824,29 @@ export default function App() {
     if (isAuthenticated || activeTab === 'chat') {
       fetchChatMessagesFromSupabase();
     }
-  }, [isAuthenticated, activeTab, staffList.length]);
+  }, [isAuthenticated, activeTab, staffList.length, currentUser.email]);
+
+  // Realtime subscription to `attendance` table in Supabase for live cross-device sync (HP <-> Laptop)
+  useEffect(() => {
+    const attendanceChannel = supabase
+      .channel('portal-attendance-global-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'attendance',
+        },
+        () => {
+          fetchAttendanceFromSupabase();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(attendanceChannel);
+    };
+  }, [staffList, currentUser.email]);
 
   // Realtime subscription to `chat_messages` table in Supabase
   useEffect(() => {
@@ -893,14 +1030,51 @@ export default function App() {
     [privateUserAttendanceLogs]
   );
 
-  // Active Checked-In Session for Current User (for Hybrid WFO <-> WFE transitions)
-  const activeCurrentUserCheckIn = useMemo(
-    () =>
-      attendanceLogs.find(
-        (l) => l.staffId === currentUser.staffId && l.status === 'checked_in'
-      ) || null,
-    [attendanceLogs, currentUser.staffId]
-  );
+  // Active Checked-In Session for Current User (synced across HP & Laptop via Supabase `attendance`)
+  const activeCurrentUserCheckIn = useMemo(() => {
+    const userEmail = (currentUser.email || '').trim().toLowerCase();
+    const fromLogs = attendanceLogs.find((l) => {
+      if (l.status !== 'checked_in') return false;
+      const sameStaffId = Boolean(
+        currentUser.staffId && l.staffId === currentUser.staffId
+      );
+      const sameEmail = Boolean(
+        userEmail && (l.email || '').trim().toLowerCase() === userEmail
+      );
+      return sameStaffId || sameEmail;
+    });
+    if (fromLogs) return fromLogs;
+
+    const activeRow = userEmail ? activeAttendanceByEmail[userEmail] : undefined;
+    if (activeRow && isAttendanceRowActiveForToday(activeRow)) {
+      return mapSupabaseAttendanceRowToRecord(activeRow, staffList);
+    }
+    return null;
+  }, [
+    attendanceLogs,
+    currentUser.staffId,
+    currentUser.email,
+    activeAttendanceByEmail,
+    staffList,
+  ]);
+
+  const todayCompletedUserAttendance = useMemo(() => {
+    const userEmail = (currentUser.email || '').trim().toLowerCase();
+    const todayWib = toJakartaDateKey(new Date());
+    return (
+      attendanceLogs.find((l) => {
+        if (l.status === 'checked_in') return false;
+        if (l.date !== todayWib) return false;
+        const sameStaffId = Boolean(
+          currentUser.staffId && l.staffId === currentUser.staffId
+        );
+        const sameEmail = Boolean(
+          userEmail && (l.email || '').trim().toLowerCase() === userEmail
+        );
+        return sameStaffId || sameEmail;
+      }) || null
+    );
+  }, [attendanceLogs, currentUser.staffId, currentUser.email]);
 
   const isCurrentUserCheckedInWfo = Boolean(
     activeCurrentUserCheckIn && activeCurrentUserCheckIn.mode === 'WFO'
@@ -1807,8 +1981,8 @@ export default function App() {
     try {
       const now = new Date();
       const isoCheckInTime = now.toISOString();
-      const exactCheckInTime = formatRealTimeHHMM(now);
-      const exactDate = isoCheckInTime.slice(0, 10);
+      const exactCheckInTime = formatJakartaTimeHHMM(now);
+      const exactDate = toJakartaDateKey(now);
       setCheckInInputTime(exactCheckInTime);
 
       const userEmail = (currentUser.email || loginEmail || 'user')
@@ -1869,20 +2043,28 @@ export default function App() {
         captureData.photoDataUrl;
 
       // 3. Insert attendance record into Supabase `attendance` table
-      const { error: insertError } = await supabase.from('attendance').insert([
-        {
-          email: userEmail,
-          mode: selectedWorkMode,
-          check_in_time: isoCheckInTime,
-          photo_url: publicPhotoUrl,
-        },
-      ]);
+      const { data: insertedRows, error: insertError } = await supabase
+        .from('attendance')
+        .insert([
+          {
+            email: userEmail,
+            mode: selectedWorkMode,
+            check_in_time: isoCheckInTime,
+            photo_url: publicPhotoUrl,
+          },
+        ])
+        .select();
 
       if (insertError) {
         throw new Error(
           `Gagal menyimpan data Check-In ke tabel attendance: ${insertError.message}`
         );
       }
+
+      const insertedId =
+        Array.isArray(insertedRows) && insertedRows[0]?.id !== undefined
+          ? String(insertedRows[0].id)
+          : `att_${now.getTime()}`;
 
       setCapturedPhotoUrl(publicPhotoUrl);
       setCapturedWatermark(captureData.locationWatermark);
@@ -1900,6 +2082,7 @@ export default function App() {
       setActiveAttendanceByEmail((prev) => ({
         ...prev,
         [userEmail]: {
+          id: insertedId,
           email: userEmail,
           mode: selectedWorkMode,
           check_in_time: isoCheckInTime,
@@ -1946,11 +2129,12 @@ export default function App() {
       }
 
       const newCheckInRecord: AttendanceRecord = {
-        id: `att_${now.getTime()}`,
+        id: insertedId,
         staffId: currentUser.staffId,
         staffName: currentUser.name,
         role: currentUser.role,
         branch: currentUser.branch,
+        email: userEmail,
         date: exactDate,
         mode: selectedWorkMode,
         initialMode: selectedWorkMode,
@@ -1971,10 +2155,17 @@ export default function App() {
       setAttendanceLogs((prev) => [
         newCheckInRecord,
         ...prev.filter(
-          (l) => !(l.staffId === currentUser.staffId && l.status === 'checked_in')
+          (l) =>
+            !(
+              (l.staffId === currentUser.staffId ||
+                (l.email || '').trim().toLowerCase() === userEmail) &&
+              l.status === 'checked_in'
+            )
         ),
       ]);
       setPendingCheckOutLogId(newCheckInRecord.id);
+
+      await fetchAttendanceFromSupabase();
 
       setExportStatusBanner({
         title: `Check-In ${selectedWorkMode} Berhasil — ${currentUser.name}`,
@@ -2001,9 +2192,10 @@ export default function App() {
       checkInUploadInputRef.current?.files?.[0] ||
       null;
     if (!fileFromInput) {
-      setCheckInError(
-        'Silakan pilih atau ambil foto kehadiran terlebih dahulu melalui tombol Ambil Foto atau Upload Foto.'
-      );
+      // Open the Quick Camera Modal (`facingMode: 'user'`) if no file was pre-selected
+      setCheckInError('');
+      setCheckInInputTime(formatJakartaTimeHHMM(new Date()));
+      setIsPhotoModalOpen(true);
       return;
     }
     await handleConfirmPhotoCheckIn({
@@ -2017,8 +2209,8 @@ export default function App() {
   // 3. HYBRID ATTENDANCE SYSTEM (WFO -> WFE) + Automatic 3D Avatar Removal
   const handleTransitionWfoToWfe = async () => {
     const now = new Date();
-    const transitionTime = formatRealTimeHHMM(now);
-    const exactDate = now.toISOString().slice(0, 10);
+    const transitionTime = formatJakartaTimeHHMM(now);
+    const exactDate = toJakartaDateKey(now);
 
     setIsPresent(false);
     setWalkInStaffId(null);
@@ -2054,6 +2246,7 @@ export default function App() {
         staffName: currentUser.name,
         role: currentUser.role,
         branch: currentUser.branch,
+        email: (currentUser.email || '').trim().toLowerCase(),
         date: exactDate,
         mode: 'WFE',
         initialMode: 'WFO',
@@ -2080,10 +2273,8 @@ export default function App() {
           .from('attendance')
           .update({
             mode: 'WFE',
-            is_hybrid_transition: true,
-            wfe_transition_time: transitionTime,
           })
-          .eq('email', userEmail)
+          .ilike('email', userEmail)
           .is('clock_out_time', null);
       } catch {
         // Fallback to local state if network fails
@@ -2095,8 +2286,6 @@ export default function App() {
           [userEmail]: {
             ...prev[userEmail],
             mode: 'WFE',
-            isHybridTransition: true,
-            wfeTransitionTime: transitionTime,
           },
         };
       });
@@ -2111,8 +2300,8 @@ export default function App() {
   // 3b. HYBRID ATTENDANCE REVERSAL SYSTEM (WFE -> WFO) + Automatic 3D Avatar Spawning
   const handleTransitionWfeToWfo = async () => {
     const now = new Date();
-    const transitionTime = formatRealTimeHHMM(now);
-    const exactDate = now.toISOString().slice(0, 10);
+    const transitionTime = formatJakartaTimeHHMM(now);
+    const exactDate = toJakartaDateKey(now);
 
     setIsPresent(true);
     setWalkInStaffId(currentUser.staffId);
@@ -2146,6 +2335,7 @@ export default function App() {
         staffName: currentUser.name,
         role: currentUser.role,
         branch: currentUser.branch,
+        email: (currentUser.email || '').trim().toLowerCase(),
         date: exactDate,
         mode: 'WFO',
         initialMode: 'WFE',
@@ -2172,10 +2362,8 @@ export default function App() {
           .from('attendance')
           .update({
             mode: 'WFO',
-            is_hybrid_transition: true,
-            wfe_transition_time: transitionTime,
           })
-          .eq('email', userEmail)
+          .ilike('email', userEmail)
           .is('clock_out_time', null);
       } catch {
         // Fallback to local state if network fails
@@ -2187,8 +2375,6 @@ export default function App() {
           [userEmail]: {
             ...prev[userEmail],
             mode: 'WFO',
-            isHybridTransition: true,
-            wfeTransitionTime: transitionTime,
           },
         };
       });
@@ -2202,7 +2388,7 @@ export default function App() {
 
   // Trigger Clock-Out: automatically captures real-time system timestamp (new Date()) and opens Mandatory "Deskripsi Pekerjaan Hari Ini" modal
   const handleEvaluateClockOutRule = () => {
-    const exactClockOutTime = formatRealTimeHHMM(new Date());
+    const exactClockOutTime = formatJakartaTimeHHMM(new Date());
     setCheckOutInputTime(exactClockOutTime);
     setPendingCheckOutLogId(activeCurrentUserCheckIn?.id || null);
     setOvertimeNoteInput('');
@@ -2221,8 +2407,8 @@ export default function App() {
     }
 
     const now = new Date();
-    const exactClockOutTime = formatRealTimeHHMM(now);
-    const exactDate = now.toISOString().slice(0, 10);
+    const exactClockOutTime = formatJakartaTimeHHMM(now);
+    const exactDate = toJakartaDateKey(now);
     setCheckOutInputTime(exactClockOutTime);
 
     const effectiveCheckIn =
@@ -2236,6 +2422,8 @@ export default function App() {
       exactClockOutTime
     );
 
+    const userEmail = (currentUser.email || '').trim().toLowerCase();
+
     const newLog: AttendanceRecord = {
       id:
         pendingCheckOutLogId ||
@@ -2245,6 +2433,7 @@ export default function App() {
       staffName: currentUser.name,
       role: currentUser.role,
       branch: currentUser.branch,
+      email: userEmail,
       date: activeCurrentUserCheckIn?.date || exactDate,
       mode: activeCurrentUserCheckIn?.mode || selectedWorkMode,
       initialMode: activeCurrentUserCheckIn?.initialMode || selectedWorkMode,
@@ -2257,6 +2446,7 @@ export default function App() {
       overtimeHours: overtimeCalc.overtimeHours,
       overtimePay: overtimeCalc.overtimePay,
       overtimeNote: trimmed, // Mandatory Daily Description strictly attached
+      task_description: trimmed,
       locationWatermark:
         activeCurrentUserCheckIn?.locationWatermark || capturedWatermark,
       mapsUri: capturedMapsLinks[0]?.uri,
@@ -2272,13 +2462,16 @@ export default function App() {
       ...prev.filter(
         (l) =>
           l.id !== newLog.id &&
-          !(l.staffId === currentUser.staffId && l.status === 'checked_in')
+          !(
+            (l.staffId === currentUser.staffId ||
+              (l.email || '').trim().toLowerCase() === userEmail) &&
+            l.status === 'checked_in'
+          )
       ),
     ]);
 
     // Update `clock_out_time` and `task_description` on today's active attendance record in Supabase
-    // so Supabase Realtime broadcasts the UPDATE (Clock-Out) event to despawn the 3D avatar
-    const userEmail = (currentUser.email || '').trim().toLowerCase();
+    // so Supabase Realtime broadcasts the UPDATE (Clock-Out) event to despawn the 3D avatar across all devices
     if (userEmail) {
       try {
         await supabase
@@ -2287,7 +2480,7 @@ export default function App() {
             clock_out_time: now.toISOString(),
             task_description: trimmed,
           })
-          .eq('email', userEmail)
+          .ilike('email', userEmail)
           .is('clock_out_time', null);
       } catch {
         // Fallback to local state removal if offline
@@ -2298,6 +2491,7 @@ export default function App() {
         delete next[userEmail];
         return next;
       });
+      await fetchAttendanceFromSupabase();
     }
 
     // Checked-out / offline: automatically remove and hide user's avatar from the 3D Virtual Office
@@ -4524,14 +4718,53 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('attendance')}
-                    className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap"
-                  >
-                    <Camera className="w-3.5 h-3.5" />
-                    <span>Photo Check-In (WFO / WFE)</span>
-                  </button>
+                  {activeCurrentUserCheckIn ? (
+                    <>
+                      <button
+                        type="button"
+                        data-testid="dashboard-checkin-status-badge"
+                        onClick={() => {
+                          setCheckInError('');
+                          setIsPhotoModalOpen(true);
+                        }}
+                        className="px-3.5 py-2 rounded-lg text-xs font-semibold text-emerald-300 bg-emerald-500/15 border border-emerald-500/40 hover:bg-emerald-500/25 flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>
+                          Sudah Check-In ({activeCurrentUserCheckIn.mode} ·{' '}
+                          {activeCurrentUserCheckIn.checkInTime} WIB)
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="dashboard-quick-checkin-btn"
+                        onClick={() => {
+                          setCheckInError('');
+                          setIsPhotoModalOpen(true);
+                        }}
+                        className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-rose-600 to-orange-500 hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap shadow-md"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>
+                          Photo Check-Out ({activeCurrentUserCheckIn.mode})
+                        </span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="dashboard-quick-checkin-btn"
+                      onClick={() => {
+                        setCheckInError('');
+                        setCheckInInputTime(formatJakartaTimeHHMM(new Date()));
+                        setIsPhotoModalOpen(true);
+                      }}
+                      className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap shadow-md"
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      <span>Photo Check-In (WFO / WFE)</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setActiveTab('pettycash')}
@@ -5016,6 +5249,8 @@ export default function App() {
                       <span className="text-xs font-bold font-mono text-emerald-400 mt-0.5 block">
                         {activeCurrentUserCheckIn?.checkInTime
                           ? `${activeCurrentUserCheckIn.checkInTime} WIB`
+                          : todayCompletedUserAttendance?.checkInTime
+                          ? `${todayCompletedUserAttendance.checkInTime} WIB`
                           : '-'}
                       </span>
                     </div>
@@ -5026,6 +5261,8 @@ export default function App() {
                       <span className="text-xs font-bold font-mono text-rose-400 mt-0.5 block">
                         {activeCurrentUserCheckIn?.checkOutTime
                           ? `${activeCurrentUserCheckIn.checkOutTime} WIB`
+                          : todayCompletedUserAttendance?.checkOutTime
+                          ? `${todayCompletedUserAttendance.checkOutTime} WIB`
                           : '-'}
                       </span>
                     </div>
@@ -5058,7 +5295,7 @@ export default function App() {
                       data-testid="attendance-camera-file-input"
                       type="file"
                       accept="image/*"
-                      capture="environment"
+                      capture="user"
                       disabled={isCheckInLocked || isSubmittingCheckIn}
                       onChange={handleAttendanceFileInputChange}
                       className="hidden"
@@ -5080,7 +5317,11 @@ export default function App() {
                         type="button"
                         data-testid="take-photo-btn"
                         disabled={isCheckInLocked || isSubmittingCheckIn}
-                        onClick={() => checkInFileInputRef.current?.click()}
+                        onClick={() => {
+                          setCheckInError('');
+                          setCheckInInputTime(formatJakartaTimeHHMM(new Date()));
+                          setIsPhotoModalOpen(true);
+                        }}
                         className={`py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 border transition-all ${
                           isDark
                             ? 'bg-slate-900 border-slate-700 text-white hover:border-[#00B4D8] hover:bg-slate-800'
@@ -5296,10 +5537,17 @@ export default function App() {
                     </p>
                   </div>
 
-                  {capturedPhotoUrl ? (
+                  {capturedPhotoUrl ||
+                  activeCurrentUserCheckIn?.photoDataUrl ||
+                  todayCompletedUserAttendance?.photoDataUrl ? (
                     <div className="mt-4 space-y-3">
                       <img
-                        src={capturedPhotoUrl}
+                        src={
+                          capturedPhotoUrl ||
+                          activeCurrentUserCheckIn?.photoDataUrl ||
+                          todayCompletedUserAttendance?.photoDataUrl ||
+                          ''
+                        }
                         alt="Watermarked Attendance Check-In"
                         data-testid="checkin-inline-preview-img"
                         referrerPolicy="no-referrer"
@@ -5307,8 +5555,15 @@ export default function App() {
                       />
                       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="font-mono text-[#00B4D8]">
-                          Mode: {activeCurrentUserCheckIn?.mode || selectedWorkMode} · Jam:{' '}
-                          {activeCurrentUserCheckIn?.checkInTime || checkInInputTime} WIB
+                          Mode:{' '}
+                          {activeCurrentUserCheckIn?.mode ||
+                            todayCompletedUserAttendance?.mode ||
+                            selectedWorkMode}{' '}
+                          · Jam:{' '}
+                          {activeCurrentUserCheckIn?.checkInTime ||
+                            todayCompletedUserAttendance?.checkInTime ||
+                            checkInInputTime}{' '}
+                          WIB
                         </span>
                         {capturedMapsLinks.map((lnk, idx) => (
                           <a
@@ -6262,7 +6517,7 @@ export default function App() {
           {activeTab === 'team_attendance' && (
             <TeamAttendanceDashboardTab
               currentUser={currentUser}
-              staffList={staffList}
+              staffList={effectiveOfficeStaffList}
               attendanceLogs={attendanceLogs}
               payrollCycleLabel={payrollCycle.label}
               onDownloadTeamPdf={handleDownloadTeamDashboardPDF}
@@ -6401,7 +6656,7 @@ export default function App() {
         </main>
       </div>
 
-      {/* Photo Check-In + HTML5 Camera/File Upload + Google Maps Grounding Modal */}
+      {/* Photo Check-In + Live Front Camera + Google Maps Grounding Modal */}
       <PhotoWatermarkModal
         isOpen={isPhotoModalOpen}
         onClose={() => setIsPhotoModalOpen(false)}
@@ -6409,12 +6664,30 @@ export default function App() {
         role={currentUser.role}
         branch={currentUser.branch}
         selectedMode={selectedWorkMode}
+        onSelectMode={(mode) => setSelectedWorkMode(mode)}
         checkInTime={checkInInputTime}
         initialPreviewObjectUrl={uploadedCheckInObjectUrl}
         initialFileName={uploadedCheckInFileName}
         initialFile={uploadedCheckInFile}
         isSubmitting={isSubmittingCheckIn}
         errorMessage={checkInError}
+        activeCheckIn={
+          activeCurrentUserCheckIn
+            ? {
+                checkInTime: activeCurrentUserCheckIn.checkInTime,
+                mode: activeCurrentUserCheckIn.mode,
+                photoDataUrl:
+                  activeCurrentUserCheckIn.photoDataUrl || capturedPhotoUrl,
+                locationWatermark: activeCurrentUserCheckIn.locationWatermark,
+              }
+            : null
+        }
+        onTriggerClockOut={handleEvaluateClockOutRule}
+        onToggleHybridMode={
+          activeCurrentUserCheckIn?.mode === 'WFE'
+            ? handleTransitionWfeToWfo
+            : handleTransitionWfoToWfe
+        }
         onConfirmCapture={handleConfirmPhotoCheckIn}
       />
 

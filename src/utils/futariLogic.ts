@@ -3454,6 +3454,27 @@ export function toLocalDateKey(date: Date = new Date()): string {
   return `${yy}-${mm}-${dd}`;
 }
 
+/** Indonesia Western Time (`Asia/Jakarta` / WIB) `YYYY-MM-DD` key for a real `Date`. */
+export function toJakartaDateKey(date: Date = new Date()): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Jakarta',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const yy = parts.find((p) => p.type === 'year')?.value;
+    const mm = parts.find((p) => p.type === 'month')?.value;
+    const dd = parts.find((p) => p.type === 'day')?.value;
+    if (yy && mm && dd) {
+      return `${yy}-${mm}-${dd}`;
+    }
+  } catch {
+    // Fallback to local date key if Intl timeZone is unavailable
+  }
+  return toLocalDateKey(date);
+}
+
 /**
  * Resolves the "Deskripsi Pekerjaan" (Jobdesk) text for exports & report tables.
  * STRICTLY sourced from `task_description` (falling back to the legacy in-memory `overtimeNote`
@@ -3466,6 +3487,26 @@ export function getAttendanceJobDescription(
   if (fromColumn) return fromColumn;
   const legacy = (log.overtimeNote || '').trim();
   return legacy || '-';
+}
+
+/** Formats a `Date` into `HH:mm` in Indonesia Western Time (`Asia/Jakarta` / WIB). */
+export function formatJakartaTimeHHMM(date: Date = new Date()): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(date);
+    const hh = parts.find((p) => p.type === 'hour')?.value;
+    const mm = parts.find((p) => p.type === 'minute')?.value;
+    if (hh && mm) {
+      return `${hh.padStart(2, '0')}:${mm.padStart(2, '0')}`;
+    }
+  } catch {
+    // Fallback to local HH:mm
+  }
+  return formatRealTimeHHMM(date);
 }
 
 /**
@@ -3484,8 +3525,8 @@ export function mapSupabaseAttendanceRowToRecord(
   const validCheckIn = checkInDate && !Number.isNaN(checkInDate.getTime()) ? checkInDate : null;
   const validClockOut = clockOutDate && !Number.isNaN(clockOutDate.getTime()) ? clockOutDate : null;
 
-  const checkInHHMM = validCheckIn ? formatRealTimeHHMM(validCheckIn) : '-';
-  const clockOutHHMM = validClockOut ? formatRealTimeHHMM(validClockOut) : '';
+  const checkInHHMM = validCheckIn ? formatJakartaTimeHHMM(validCheckIn) : '-';
+  const clockOutHHMM = validClockOut ? formatJakartaTimeHHMM(validClockOut) : '';
   const overtime = clockOutHHMM ? calculateOvertime(clockOutHHMM) : { overtimeHours: 0, overtimePay: 0 };
   const taskDescription = (row.task_description || '').trim();
   const mode: 'WFO' | 'WFE' = String(row.mode || '').toUpperCase() === 'WFE' ? 'WFE' : 'WFO';
@@ -3497,7 +3538,7 @@ export function mapSupabaseAttendanceRowToRecord(
     role: member?.role || '-',
     branch: member?.branch || 'JKT',
     email,
-    date: validCheckIn ? toLocalDateKey(validCheckIn) : toLocalDateKey(new Date()),
+    date: validCheckIn ? toJakartaDateKey(validCheckIn) : toJakartaDateKey(new Date()),
     mode,
     initialMode: mode,
     checkInTime: checkInHHMM,
@@ -3518,19 +3559,19 @@ export function mapSupabaseAttendanceRowToRecord(
 export function formatAttendanceCheckInHHMM(
   rawCheckIn?: string | null
 ): string {
-  if (!rawCheckIn) return formatRealTimeHHMM();
+  if (!rawCheckIn) return formatJakartaTimeHHMM();
   const str = String(rawCheckIn).trim();
   if (/^\d{2}:\d{2}$/.test(str)) return str;
   const parsed = new Date(str);
   if (!Number.isNaN(parsed.getTime())) {
-    return formatRealTimeHHMM(parsed);
+    return formatJakartaTimeHHMM(parsed);
   }
-  return formatRealTimeHHMM();
+  return formatJakartaTimeHHMM();
 }
 
 /**
  * Determines whether a row from the `attendance` table represents an active presence for today:
- * - Must have a non-null `check_in_time` belonging to today.
+ * - Must have a non-null `check_in_time` belonging to today (in `Asia/Jakarta` WIB or local/UTC day).
  * - Must have `clock_out_time` (and `check_out_time`) equal to `NULL` / empty.
  */
 export function isAttendanceRowActiveForToday(
@@ -3558,13 +3599,15 @@ export function isAttendanceRowActiveForToday(
 
   const parsedCheckIn = new Date(rawCheckIn);
   if (!Number.isNaN(parsedCheckIn.getTime())) {
+    const isSameJakartaDay =
+      toJakartaDateKey(parsedCheckIn) === toJakartaDateKey(referenceDate);
     const isSameLocalDay =
       parsedCheckIn.getFullYear() === referenceDate.getFullYear() &&
       parsedCheckIn.getMonth() === referenceDate.getMonth() &&
       parsedCheckIn.getDate() === referenceDate.getDate();
     const todayUtcPrefix = referenceDate.toISOString().slice(0, 10);
     const isSameUtcDay = rawCheckIn.slice(0, 10) === todayUtcPrefix;
-    return isSameLocalDay || isSameUtcDay;
+    return isSameJakartaDay || isSameLocalDay || isSameUtcDay;
   }
 
   return true;
@@ -3572,7 +3615,8 @@ export function isAttendanceRowActiveForToday(
 
 /**
  * Merges active today's `attendance` records (`check_in_time` IS NOT NULL AND `clock_out_time` IS NULL)
- * onto the personnel directory so ONLY actively checked-in users have `workMode: 'WFO'` in the 3D Virtual Office.
+ * onto the personnel directory so ONLY actively checked-in WFO users have `workMode: 'WFO'` in the 3D Virtual Office,
+ * while actively checked-in WFE users have `workMode: 'WFE'`.
  */
 export function applyActiveAttendanceToStaffList(
   staffList: StaffMemberRecord[],
@@ -3585,9 +3629,11 @@ export function applyActiveAttendanceToStaffList(
 
     if (activeRow && isAttendanceRowActiveForToday(activeRow)) {
       matchedEmails.add(emailKey);
+      const activeMode: WorkModeType =
+        String(activeRow.mode || '').toUpperCase() === 'WFE' ? 'WFE' : 'WFO';
       return {
         ...member,
-        workMode: 'WFO' as WorkModeType,
+        workMode: activeMode,
         checkInTime: formatAttendanceCheckInHHMM(activeRow.check_in_time),
       };
     }
@@ -3609,9 +3655,11 @@ export function applyActiveAttendanceToStaffList(
         },
         staffList.length + idx
       );
+      const activeMode: WorkModeType =
+        String(row.mode || '').toUpperCase() === 'WFE' ? 'WFE' : 'WFO';
       updatedList.push({
         ...synthesized,
-        workMode: 'WFO',
+        workMode: activeMode,
         checkInTime: formatAttendanceCheckInHHMM(row.check_in_time),
       });
     }
