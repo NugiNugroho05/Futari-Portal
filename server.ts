@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { runSupabaseKeepAlive } from './api/keep-alive';
 // import { GoogleGenAI, ThinkingLevel, Type, GenerateContentResponse } from '@google/genai';
 
 dotenv.config();
@@ -34,6 +35,20 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json({ limit: '10mb' }));
+
+  // Supabase Keep-Alive Endpoint (prevents Supabase free-tier database from auto-pausing due to inactivity)
+  app.get('/api/keep-alive', async (_req, res) => {
+    try {
+      const payload = await runSupabaseKeepAlive();
+      res.status(200).json(payload);
+    } catch (error: any) {
+      res.status(500).json({
+        ok: false,
+        message: error?.message || 'Supabase keep-alive failed',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
 
   /*
   // Google GenAI Backend Routes Disabled for Production Cleanup:
