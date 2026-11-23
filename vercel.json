@@ -3,6 +3,18 @@
     {
       "path": "/api/keep-alive",
       "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/reminder-checkout",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/reminder-overtime",
+      "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/auto-end-overtime",
+      "schedule": "20 13 * * *"
     }
   ],
   "rewrites": [

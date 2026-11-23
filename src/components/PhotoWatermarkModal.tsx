@@ -11,6 +11,8 @@ import {
   LogOut,
   Building2,
   ArrowLeftRight,
+  Navigation,
+  AlertTriangle,
 } from 'lucide-react';
 import { BranchType, FUTARI_HQ_ADDRESS } from '../utils/futariLogic';
 
@@ -42,9 +44,17 @@ interface PhotoWatermarkModalProps {
     file?: File | null;
     photoDataUrl: string;
     locationWatermark: string;
+    locationAddress: string;
+    latitude: number | null;
+    longitude: number | null;
     mapsLinks: { title: string; uri: string }[];
   }) => void;
 }
+
+const JAKARTA_HQ_COORDS = { lat: -6.2764, lon: 106.8019 };
+const BANDUNG_BRANCH_COORDS = { lat: -6.8898, lon: 107.6128 };
+const BANDUNG_BRANCH_ADDRESS =
+  'Futari Bandung Creative Hub, Jl. Ir. H. Juanda No. 88, Bandung';
 
 export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
   isOpen,
@@ -72,30 +82,33 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
   const [isGroundingMaps, setIsGroundingMaps] = useState(false);
   const [isCameraStreaming, setIsCameraStreaming] = useState(false);
   const [cameraError, setCameraError] = useState<string>('');
+  const [gpsStatusMessage, setGpsStatusMessage] = useState<string>('');
+  const [gpsFallbackWarning, setGpsFallbackWarning] = useState<string>('');
 
-  const getDefaultWatermarkAddress = (b: BranchType, mode: 'WFO' | 'WFE') =>
-    b === 'Bandung'
-      ? 'Futari Bandung Creative Hub, Jl. Ir. H. Juanda No. 88, Bandung'
-      : mode === 'WFE'
-      ? 'Jakarta Convention Center (JCC) Senayan, Jl. Gatot Subroto, Jakarta'
-      : FUTARI_HQ_ADDRESS;
+  const getOfficeAddress = (b: BranchType) =>
+    b === 'Bandung' ? BANDUNG_BRANCH_ADDRESS : FUTARI_HQ_ADDRESS;
 
-  const [locationWatermark, setLocationWatermark] = useState(
-    getDefaultWatermarkAddress(branch, selectedMode)
+  const getOfficeCoords = (b: BranchType) =>
+    b === 'Bandung' ? BANDUNG_BRANCH_COORDS : JAKARTA_HQ_COORDS;
+
+  const [detectedLatitude, setDetectedLatitude] = useState<number | null>(
+    getOfficeCoords(branch).lat
+  );
+  const [detectedLongitude, setDetectedLongitude] = useState<number | null>(
+    getOfficeCoords(branch).lon
+  );
+  const [locationWatermark, setLocationWatermark] = useState<string>(
+    getOfficeAddress(branch)
   );
   const [mapsLinks, setMapsLinks] = useState<{ title: string; uri: string }[]>([
     {
       title:
         branch === 'Bandung'
           ? 'Futari Bandung Creative Hub'
-          : selectedMode === 'WFE'
-          ? 'Jakarta Convention Center Senayan'
           : 'Futari HQ Jakarta — Jl. Nusa Indah No.33, Cipete Selatan',
       uri:
         branch === 'Bandung'
           ? 'https://www.google.com/maps/search/?api=1&query=Jalan+Ir+H+Juanda+88+Bandung'
-          : selectedMode === 'WFE'
-          ? 'https://www.google.com/maps/search/?api=1&query=Jakarta+Convention+Center+Senayan'
           : 'https://www.google.com/maps/search/?api=1&query=Jl.+Nusa+Indah+No.33,+RT.14/RW.5,+Cipete+Sel.,+Kec.+Cilandak,+Kota+Jakarta+Selatan,+Daerah+Khusus+Ibukota+Jakarta+12410',
     },
   ]);
@@ -240,7 +253,7 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
 
     ctx.fillStyle = '#cbd5e1';
     ctx.font = '10.5px "Plus Jakarta Sans", sans-serif';
-    const fullWatermarkText = `MAPS WATERMARK: ${addressText}`;
+    const fullWatermarkText = `LOKASI: ${addressText}`;
     if (fullWatermarkText.length <= 72) {
       ctx.fillText(fullWatermarkText, 16, h - 24);
     } else {
@@ -333,6 +346,11 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
 
     const w = canvas.width;
     const h = canvas.height;
+    const activeAddress =
+      locationWatermark.trim() ||
+      (selectedMode === 'WFO'
+        ? getOfficeAddress(branch)
+        : 'Lokasi Event (WFE)');
 
     if (video && isCameraStreaming && video.readyState >= 2) {
       // Mirror front camera horizontally so selfie looks natural
@@ -341,9 +359,9 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
       ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, w, h);
       ctx.restore();
-      drawWatermarkedOverlay(ctx, w, h, locationWatermark);
+      drawWatermarkedOverlay(ctx, w, h, activeAddress);
     } else {
-      drawWatermarkedPhoto(locationWatermark);
+      drawWatermarkedPhoto(activeAddress);
     }
 
     const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
@@ -373,55 +391,177 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
     startFrontCamera();
   };
 
-  const fetchMapsGrounding = async () => {
-    const defaultAddr = getDefaultWatermarkAddress(branch, selectedMode);
-    setLocationWatermark(defaultAddr);
-    setIsGroundingMaps(true);
-    try {
-      const res = await fetch('/api/gemini/maps-grounding', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: selectedMode,
-          branch,
-          latitude: branch === 'Bandung' ? -6.8898 : -6.2764,
-          longitude: branch === 'Bandung' ? 107.6128 : 106.8019,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const addr = data.watermarkAddress || defaultAddr;
-        setLocationWatermark(addr);
-        if (
-          Array.isArray(data.groundingLinks) &&
-          data.groundingLinks.length > 0
-        ) {
-          setMapsLinks(data.groundingLinks);
-        }
-        if (
-          Array.isArray(data.reviewSnippets) &&
-          data.reviewSnippets.length > 0
-        ) {
-          setReviewSnippet(data.reviewSnippets[0]);
-        }
-        drawWatermarkedPhoto(addr);
-      } else {
-        drawWatermarkedPhoto(defaultAddr);
-      }
-    } catch {
-      drawWatermarkedPhoto(defaultAddr);
-    } finally {
-      setIsGroundingMaps(false);
+  /**
+   * Resolves location based on mode:
+   * - WFO: Uses office location (`Jakarta HQ` or `Bandung Branch`).
+   * - WFE: Uses `navigator.geolocation.getCurrentPosition({ enableHighAccuracy: true })`
+   *   and OpenStreetMap Nominatim Reverse Geocoding (`https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}`).
+   *   Falls back cleanly to manual input if GPS permission is denied or unavailable.
+   */
+  const resolveLocationForMode = useCallback(async () => {
+    setGpsFallbackWarning('');
+    setGpsStatusMessage('');
+
+    if (selectedMode === 'WFO') {
+      const officeAddr = getOfficeAddress(branch);
+      const officeCoords = getOfficeCoords(branch);
+      setDetectedLatitude(officeCoords.lat);
+      setDetectedLongitude(officeCoords.lon);
+      setLocationWatermark(officeAddr);
+      setReviewSnippet(
+        branch === 'Bandung'
+          ? 'Lokasi Kantor: Futari Bandung Creative Hub'
+          : 'Lokasi Kantor: Futari HQ Jakarta (Cipete Selatan)'
+      );
+      setMapsLinks([
+        {
+          title:
+            branch === 'Bandung'
+              ? 'Futari Bandung Creative Hub'
+              : 'Futari HQ Jakarta — Jl. Nusa Indah No.33, Cipete Selatan',
+          uri:
+            branch === 'Bandung'
+              ? 'https://www.google.com/maps/search/?api=1&query=Jalan+Ir+H+Juanda+88+Bandung'
+              : 'https://www.google.com/maps/search/?api=1&query=Jl.+Nusa+Indah+No.33,+RT.14/RW.5,+Cipete+Sel.,+Kec.+Cilandak,+Kota+Jakarta+Selatan,+Daerah+Khusus+Ibukota+Jakarta+12410',
+        },
+      ]);
+      drawWatermarkedPhoto(officeAddr);
+      return;
     }
-  };
+
+    // WFE Mode: Auto-detect GPS coordinates & reverse geocode via OpenStreetMap Nominatim
+    setIsGroundingMaps(true);
+    setGpsStatusMessage(
+      'Mendeteksi koordinat GPS & alamat lokasi event (OpenStreetMap Nominatim)...'
+    );
+
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.geolocation ||
+      typeof navigator.geolocation.getCurrentPosition !== 'function'
+    ) {
+      setIsGroundingMaps(false);
+      setGpsStatusMessage('');
+      setDetectedLatitude(null);
+      setDetectedLongitude(null);
+      setGpsFallbackWarning(
+        'Perangkat/browser tidak mendukung GPS otomatis. Silakan isi alamat atau nama lokasi event secara manual di bawah.'
+      );
+      drawWatermarkedPhoto(locationWatermark);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const lat = Number(position.coords.latitude.toFixed(6));
+        const lon = Number(position.coords.longitude.toFixed(6));
+        setDetectedLatitude(lat);
+        setDetectedLongitude(lon);
+        setMapsLinks([
+          {
+            title: `Titik GPS Event (${lat}, ${lon})`,
+            uri: `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`,
+          },
+        ]);
+
+        try {
+          const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(
+            lat
+          )}&lon=${encodeURIComponent(lon)}`;
+          const res = await fetch(nominatimUrl, {
+            headers: {
+              'Accept-Language': 'id,en',
+            },
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const detectedAddress =
+              (data?.display_name && String(data.display_name).trim()) ||
+              `Koordinat GPS Event (${lat}, ${lon})`;
+            setLocationWatermark(detectedAddress);
+            setReviewSnippet(
+              `GPS Akurasi Tinggi Terverifikasi (${lat}, ${lon}) · OpenStreetMap Nominatim`
+            );
+            setGpsStatusMessage('Alamat lokasi event berhasil dideteksi via GPS!');
+            drawWatermarkedPhoto(detectedAddress);
+          } else {
+            const coordFallback = `Lokasi Event WFE (GPS: ${lat}, ${lon})`;
+            setLocationWatermark(coordFallback);
+            setReviewSnippet(`Koordinat GPS Terkunci (${lat}, ${lon})`);
+            setGpsFallbackWarning(
+              'Koordinat GPS berhasil didapat, namun layanan nama jalan sedang sibuk. Anda dapat melengkapi nama venue/jalan di bawah.'
+            );
+            drawWatermarkedPhoto(coordFallback);
+          }
+        } catch {
+          const coordFallback = `Lokasi Event WFE (GPS: ${lat}, ${lon})`;
+          setLocationWatermark(coordFallback);
+          setReviewSnippet(`Koordinat GPS Terkunci (${lat}, ${lon})`);
+          setGpsFallbackWarning(
+            'Koordinat GPS berhasil didapat. Silakan lengkapi detail nama tempat/event secara manual jika diperlukan.'
+          );
+          drawWatermarkedPhoto(coordFallback);
+        } finally {
+          setIsGroundingMaps(false);
+        }
+      },
+      (geoErr) => {
+        setIsGroundingMaps(false);
+        setGpsStatusMessage('');
+        setDetectedLatitude(null);
+        setDetectedLongitude(null);
+        const reason =
+          geoErr?.code === 1
+            ? 'Izin akses lokasi (GPS) ditolak pada browser/perangkat.'
+            : 'Gagal mendapatkan sinyal GPS perangkat.';
+        setGpsFallbackWarning(
+          `${reason} Silakan ketik nama lokasi/alamat event WFE secara manual pada kolom di bawah.`
+        );
+        setReviewSnippet('Mode Input Lokasi Event Manual (Fallback GPS)');
+        if (
+          !locationWatermark.trim() ||
+          locationWatermark === FUTARI_HQ_ADDRESS ||
+          locationWatermark === BANDUNG_BRANCH_ADDRESS
+        ) {
+          setLocationWatermark('');
+        }
+        drawWatermarkedPhoto(
+          locationWatermark.trim() || 'Lokasi Event WFE (Input Manual)'
+        );
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      }
+    );
+  }, [branch, selectedMode]);
 
   useEffect(() => {
-    if (isOpen) {
-      fetchMapsGrounding();
+    if (isOpen && !activeCheckIn) {
+      void resolveLocationForMode();
     }
-  }, [isOpen, selectedMode, branch, checkInTime]);
+  }, [isOpen, selectedMode, branch, activeCheckIn, resolveLocationForMode]);
+
+  useEffect(() => {
+    if (isOpen && !activeCheckIn) {
+      drawWatermarkedPhoto(
+        locationWatermark.trim() ||
+          (selectedMode === 'WFO'
+            ? getOfficeAddress(branch)
+            : 'Lokasi Event WFE')
+      );
+    }
+  }, [locationWatermark, checkInTime, isOpen, activeCheckIn]);
 
   if (!isOpen) return null;
+
+  const finalResolvedAddress =
+    locationWatermark.trim() ||
+    (selectedMode === 'WFO'
+      ? getOfficeAddress(branch)
+      : 'Work From Event (WFE)');
 
   return (
     <div
@@ -475,6 +615,12 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                 Supabase. Anda dapat melakukan transisi lokasi (WFO ↔ WFE) atau
                 langsung melakukan Clock-Out (Pulang) dari perangkat ini.
               </p>
+              {activeCheckIn.locationWatermark && (
+                <p className="text-[11px] text-slate-300 flex items-start gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-[#00B4D8] shrink-0 mt-0.5" />
+                  <span>{activeCheckIn.locationWatermark}</span>
+                </p>
+              )}
               {activeCheckIn.photoDataUrl && (
                 <div className="rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
                   <img
@@ -575,7 +721,7 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                         {checkInTime} WIB · {staffName}
                       </p>
                       <p className="text-slate-300 truncate">
-                        {locationWatermark}
+                        {finalResolvedAddress}
                       </p>
                     </div>
                     <button
@@ -617,7 +763,7 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                       {staffName} — {role}
                     </p>
                     <p className="text-[11px] text-slate-300 truncate mt-0.5">
-                      MAPS WATERMARK: {locationWatermark}
+                      LOKASI: {finalResolvedAddress}
                     </p>
                   </div>
                 </div>
@@ -685,36 +831,92 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
               />
             </div>
 
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+            {/* Location & GPS Reverse Geocoding Box (WFO Office vs WFE Auto-GPS + Manual Fallback) */}
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 text-xs">
               <div className="flex items-center justify-between text-slate-300">
                 <span className="flex items-center gap-1.5 font-medium text-[#00B4D8]">
                   <Clock className="w-3.5 h-3.5" />
                   <span>Timestamp Overlay: {checkInTime} WIB</span>
                 </span>
-                <button
-                  type="button"
-                  onClick={fetchMapsGrounding}
-                  disabled={isGroundingMaps}
-                  className="flex items-center gap-1 text-slate-300 hover:text-white"
-                >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 ${
-                      isGroundingMaps ? 'animate-spin' : ''
-                    }`}
-                  />
-                  <span>Refresh GPS Grounding</span>
-                </button>
+                {selectedMode === 'WFE' && (
+                  <button
+                    type="button"
+                    data-testid="refresh-wfe-gps-btn"
+                    onClick={() => void resolveLocationForMode()}
+                    disabled={isGroundingMaps}
+                    className="flex items-center gap-1 text-[#00B4D8] hover:underline disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${
+                        isGroundingMaps ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>
+                      {isGroundingMaps
+                        ? 'Mendeteksi GPS...'
+                        : 'Deteksi Ulang GPS'}
+                    </span>
+                  </button>
+                )}
               </div>
+
+              {gpsStatusMessage && (
+                <div className="p-2 rounded-lg bg-[#00B4D8]/10 border border-[#00B4D8]/30 text-[11px] text-[#00B4D8] flex items-center gap-1.5">
+                  <Navigation className="w-3.5 h-3.5 shrink-0" />
+                  <span>{gpsStatusMessage}</span>
+                </div>
+              )}
+
+              {gpsFallbackWarning && (
+                <div
+                  data-testid="wfe-gps-fallback-warning"
+                  className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 flex items-start gap-1.5"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+                  <span>{gpsFallbackWarning}</span>
+                </div>
+              )}
 
               <div className="flex items-start gap-1.5 text-slate-200">
                 <MapPin className="w-3.5 h-3.5 text-[#00B4D8] shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium">{locationWatermark}</p>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    {reviewSnippet}
+                <div className="w-full space-y-1.5">
+                  <p className="font-medium break-words">
+                    {finalResolvedAddress}
                   </p>
+                  {detectedLatitude !== null && detectedLongitude !== null && (
+                    <p className="text-[11px] font-mono text-emerald-400">
+                      Koordinat GPS: {detectedLatitude}, {detectedLongitude}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-400">{reviewSnippet}</p>
                 </div>
               </div>
+
+              {/* Manual / Editable WFE Event Location Input (Auto-filled by Nominatim or editable fallback) */}
+              {selectedMode === 'WFE' && (
+                <div className="pt-1.5 space-y-1">
+                  <label
+                    htmlFor="wfe-manual-location-input"
+                    className="block text-[11px] font-semibold text-amber-300"
+                  >
+                    Alamat / Keterangan Lokasi Event (WFE):
+                  </label>
+                  <input
+                    id="wfe-manual-location-input"
+                    data-testid="wfe-manual-location-input"
+                    type="text"
+                    value={locationWatermark}
+                    onChange={(e) => setLocationWatermark(e.target.value)}
+                    placeholder="Contoh: Hall A JCC Senayan, Jl. Gatot Subroto, Jakarta..."
+                    className="w-full px-3 py-2 rounded-lg text-xs bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-[#00B4D8]"
+                  />
+                  <p className="text-[10px] text-slate-400">
+                    Otomatis terisi dari GPS (OpenStreetMap Nominatim). Anda
+                    juga dapat mengedit atau mengisi manual jika izin GPS
+                    ditolak.
+                  </p>
+                </div>
+              )}
 
               {mapsLinks.length > 0 && (
                 <div className="pt-1 flex flex-wrap gap-2">
@@ -727,7 +929,7 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                       className="inline-flex items-center gap-1 text-[11px] text-[#00B4D8] hover:underline"
                     >
                       <ExternalLink className="w-3 h-3" />
-                      <span>{link.title} (Google Maps Grounded)</span>
+                      <span>{link.title}</span>
                     </a>
                   ))}
                 </div>
@@ -762,7 +964,10 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                     onConfirmCapture({
                       file: captured.file,
                       photoDataUrl: captured.dataUrl,
-                      locationWatermark,
+                      locationWatermark: finalResolvedAddress,
+                      locationAddress: finalResolvedAddress,
+                      latitude: detectedLatitude,
+                      longitude: detectedLongitude,
                       mapsLinks,
                     });
                     return;
@@ -770,7 +975,10 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                   onConfirmCapture({
                     file: selectedFile,
                     photoDataUrl: uploadedObjectUrl || photoDataUrl,
-                    locationWatermark,
+                    locationWatermark: finalResolvedAddress,
+                    locationAddress: finalResolvedAddress,
+                    latitude: detectedLatitude,
+                    longitude: detectedLongitude,
                     mapsLinks,
                   });
                 }}

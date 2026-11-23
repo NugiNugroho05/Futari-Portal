@@ -114,7 +114,12 @@ export interface AttendanceRecord {
   overtimePay: number;
   overtimeNote: string; // Deskripsi Pekerjaan Hari Ini (Mandatory for all clock-outs)
   task_description?: string; // Supabase `attendance.task_description` (Jobdesk / Pekerjaan typed on Clock-Out)
+  notes?: string | null; // Supabase `attendance.notes` (e.g. Auto Check-Out System note)
   email?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  location_address?: string | null;
+  is_overtime?: boolean | null;
   locationWatermark: string;
   mapsUri?: string;
   photoDataUrl?: string;
@@ -3443,6 +3448,11 @@ export interface SupabaseAttendanceRow {
   check_out_time?: string | null;
   photo_url?: string | null;
   task_description?: string | null;
+  notes?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  location_address?: string | null;
+  is_overtime?: boolean | null;
   created_at?: string | null;
 }
 
@@ -3475,16 +3485,39 @@ export function toJakartaDateKey(date: Date = new Date()): string {
   return toLocalDateKey(date);
 }
 
+/** Returns current hour (0-23) in Indonesia Western Time (`Asia/Jakarta` / WIB). */
+export function getJakartaHour(date: Date = new Date()): number {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      hour12: false,
+    }).formatToParts(date);
+    const hh = parts.find((p) => p.type === 'hour')?.value;
+    if (hh !== undefined) {
+      const parsed = Number(hh);
+      if (!Number.isNaN(parsed)) {
+        return parsed % 24;
+      }
+    }
+  } catch {
+    // Fallback to local hour
+  }
+  return date.getHours();
+}
+
 /**
  * Resolves the "Deskripsi Pekerjaan" (Jobdesk) text for exports & report tables.
- * STRICTLY sourced from `task_description` (falling back to the legacy in-memory `overtimeNote`
+ * STRICTLY sourced from `task_description` (falling back to `notes` or legacy in-memory `overtimeNote`
  * for records created before the column existed). NEVER returns the location / watermark.
  */
 export function getAttendanceJobDescription(
-  log: Pick<AttendanceRecord, 'task_description' | 'overtimeNote'>
+  log: Pick<AttendanceRecord, 'task_description' | 'notes' | 'overtimeNote'>
 ): string {
   const fromColumn = (log.task_description || '').trim();
   if (fromColumn) return fromColumn;
+  const fromNotes = (log.notes || '').trim();
+  if (fromNotes) return fromNotes;
   const legacy = (log.overtimeNote || '').trim();
   return legacy || '-';
 }
@@ -3528,15 +3561,24 @@ export function mapSupabaseAttendanceRowToRecord(
   const checkInHHMM = validCheckIn ? formatJakartaTimeHHMM(validCheckIn) : '-';
   const clockOutHHMM = validClockOut ? formatJakartaTimeHHMM(validClockOut) : '';
   const overtime = clockOutHHMM ? calculateOvertime(clockOutHHMM) : { overtimeHours: 0, overtimePay: 0 };
-  const taskDescription = (row.task_description || '').trim();
+  const notesText = (row.notes || '').trim();
+  const taskDescription = (row.task_description || '').trim() || notesText;
   const mode: 'WFO' | 'WFE' = String(row.mode || '').toUpperCase() === 'WFE' ? 'WFE' : 'WFO';
+  const branch = member?.branch || 'JKT';
+  const defaultOfficeAddress =
+    branch === 'Bandung'
+      ? 'Futari Bandung Creative Hub, Jl. Ir. H. Juanda No. 88, Bandung'
+      : FUTARI_HQ_ADDRESS;
+  const resolvedLocationAddress =
+    (row.location_address || '').trim() ||
+    (mode === 'WFO' ? defaultOfficeAddress : 'Work From Event (WFE)');
 
   return {
     id: row.id !== undefined && row.id !== null ? String(row.id) : `att_${email}_${row.check_in_time}`,
     staffId: member?.staffId || email,
     staffName: member?.name || email,
     role: member?.role || '-',
-    branch: member?.branch || 'JKT',
+    branch,
     email,
     date: validCheckIn ? toJakartaDateKey(validCheckIn) : toJakartaDateKey(new Date()),
     mode,
@@ -3550,7 +3592,12 @@ export function mapSupabaseAttendanceRowToRecord(
     overtimePay: overtime.overtimePay,
     overtimeNote: taskDescription,
     task_description: taskDescription,
-    locationWatermark: mode === 'WFO' ? FUTARI_HQ_ADDRESS : 'Work From Elsewhere (WFE)',
+    notes: notesText || null,
+    latitude: row.latitude ?? null,
+    longitude: row.longitude ?? null,
+    location_address: resolvedLocationAddress,
+    is_overtime: Boolean(row.is_overtime),
+    locationWatermark: resolvedLocationAddress,
     photoDataUrl: row.photo_url || undefined,
     status: clockOutHHMM ? 'completed' : 'checked_in',
   };

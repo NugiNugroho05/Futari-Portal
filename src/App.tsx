@@ -124,6 +124,7 @@ import {
   dueDateInputToIso,
   toLocalDateKey,
   toJakartaDateKey,
+  getJakartaHour,
   formatJakartaTimeHHMM,
   formatAttendanceCheckInHHMM,
   getAttendanceJobDescription,
@@ -1966,11 +1967,88 @@ export default function App() {
     setCheckInError('');
   };
 
+  const [isConfirmingOvertime, setIsConfirmingOvertime] =
+    useState<boolean>(false);
+  const [
+    isOvertimeConfirmPromptDismissed,
+    setIsOvertimeConfirmPromptDismissed,
+  ] = useState<boolean>(false);
+
+  // Reset overtime confirmation prompt dismissal whenever the active check-in session changes
+  useEffect(() => {
+    setIsOvertimeConfirmPromptDismissed(false);
+  }, [activeCurrentUserCheckIn?.id]);
+
+  // Show pop-up confirmation modal when user opens portal at >= 20:00 WIB while still Checked-In and `is_overtime` is false
+  const shouldShowOvertimeConfirmationModal = useMemo(() => {
+    if (!isAuthenticated || !activeCurrentUserCheckIn) return false;
+    if (activeCurrentUserCheckIn.status !== 'checked_in') return false;
+    if (activeCurrentUserCheckIn.is_overtime === true) return false;
+    if (isOvertimeModalOpen || isOvertimeConfirmPromptDismissed) return false;
+    return getJakartaHour(currentTime) >= 20;
+  }, [
+    isAuthenticated,
+    activeCurrentUserCheckIn,
+    isOvertimeModalOpen,
+    isOvertimeConfirmPromptDismissed,
+    currentTime,
+  ]);
+
+  const handleConfirmActiveOvertime = async () => {
+    if (isConfirmingOvertime) return;
+    setIsConfirmingOvertime(true);
+    try {
+      const userEmail = (currentUser.email || '').trim().toLowerCase();
+      if (userEmail) {
+        await supabase
+          .from('attendance')
+          .update({ is_overtime: true })
+          .ilike('email', userEmail)
+          .is('clock_out_time', null);
+
+        setActiveAttendanceByEmail((prev) => {
+          if (!prev[userEmail]) return prev;
+          return {
+            ...prev,
+            [userEmail]: {
+              ...prev[userEmail],
+              is_overtime: true,
+            },
+          };
+        });
+      }
+
+      setAttendanceLogs((prev) =>
+        prev.map((l) =>
+          (l.staffId === currentUser.staffId ||
+            (l.email || '').trim().toLowerCase() === userEmail) &&
+          l.status === 'checked_in'
+            ? { ...l, is_overtime: true }
+            : l
+        )
+      );
+
+      setIsOvertimeConfirmPromptDismissed(true);
+      await fetchAttendanceFromSupabase();
+
+      setExportStatusBanner({
+        title: `Konfirmasi Lembur Aktif — ${currentUser.name}`,
+        message:
+          'Status lembur Anda (is_overtime = true) telah tersimpan di Supabase. Sesi kehadiran Anda tidak akan di-Auto Check-Out pada pukul 20:20 WIB.',
+      });
+    } finally {
+      setIsConfirmingOvertime(false);
+    }
+  };
+
   // Attendance Check-In Handler: Uploads photo to `attendance_photos` bucket & inserts record into `attendance` table
   const handleConfirmPhotoCheckIn = async (captureData: {
     file?: File | null;
     photoDataUrl: string;
     locationWatermark: string;
+    locationAddress?: string;
+    latitude?: number | null;
+    longitude?: number | null;
     mapsLinks: { title: string; uri: string }[];
   }) => {
     if (isSubmittingCheckIn || isCheckInLocked) return;
@@ -2042,7 +2120,34 @@ export default function App() {
         uploadedCheckInObjectUrl ||
         captureData.photoDataUrl;
 
-      // 3. Insert attendance record into Supabase `attendance` table
+      const defaultOfficeAddr =
+        currentUser.branch === 'Bandung'
+          ? 'Futari Bandung Creative Hub, Jl. Ir. H. Juanda No. 88, Bandung'
+          : FUTARI_HQ_ADDRESS;
+      const defaultOfficeLat =
+        currentUser.branch === 'Bandung' ? -6.8898 : -6.2764;
+      const defaultOfficeLon =
+        currentUser.branch === 'Bandung' ? 107.6128 : 106.8019;
+
+      const resolvedLocationAddress =
+        (captureData.locationAddress || captureData.locationWatermark || '').trim() ||
+        (selectedWorkMode === 'WFO'
+          ? defaultOfficeAddr
+          : 'Work From Event (WFE)');
+      const resolvedLatitude =
+        captureData.latitude !== undefined
+          ? captureData.latitude
+          : selectedWorkMode === 'WFO'
+          ? defaultOfficeLat
+          : null;
+      const resolvedLongitude =
+        captureData.longitude !== undefined
+          ? captureData.longitude
+          : selectedWorkMode === 'WFO'
+          ? defaultOfficeLon
+          : null;
+
+      // 3. Insert attendance record into Supabase `attendance` table (including latitude, longitude, location_address, is_overtime)
       const { data: insertedRows, error: insertError } = await supabase
         .from('attendance')
         .insert([
@@ -2051,6 +2156,10 @@ export default function App() {
             mode: selectedWorkMode,
             check_in_time: isoCheckInTime,
             photo_url: publicPhotoUrl,
+            latitude: resolvedLatitude,
+            longitude: resolvedLongitude,
+            location_address: resolvedLocationAddress,
+            is_overtime: false,
           },
         ])
         .select();
@@ -2067,7 +2176,7 @@ export default function App() {
           : `att_${now.getTime()}`;
 
       setCapturedPhotoUrl(publicPhotoUrl);
-      setCapturedWatermark(captureData.locationWatermark);
+      setCapturedWatermark(resolvedLocationAddress);
       setCapturedMapsLinks(captureData.mapsLinks);
       setIsPhotoModalOpen(false);
 
@@ -2088,6 +2197,10 @@ export default function App() {
           check_in_time: isoCheckInTime,
           clock_out_time: null,
           photo_url: publicPhotoUrl,
+          latitude: resolvedLatitude,
+          longitude: resolvedLongitude,
+          location_address: resolvedLocationAddress,
+          is_overtime: false,
         },
       }));
 
@@ -2146,7 +2259,11 @@ export default function App() {
         overtimeHours: 0,
         overtimePay: 0,
         overtimeNote: `Checked-In (${selectedWorkMode}) pukul ${exactCheckInTime} WIB`,
-        locationWatermark: captureData.locationWatermark,
+        latitude: resolvedLatitude,
+        longitude: resolvedLongitude,
+        location_address: resolvedLocationAddress,
+        is_overtime: false,
+        locationWatermark: resolvedLocationAddress,
         mapsUri: captureData.mapsLinks[0]?.uri,
         photoDataUrl: publicPhotoUrl || undefined,
         status: 'checked_in',
@@ -6690,6 +6807,93 @@ export default function App() {
         }
         onConfirmCapture={handleConfirmPhotoCheckIn}
       />
+
+      {/* Pop-up Modal Konfirmasi Lembur (>= 20:00 WIB while still Checked-In & is_overtime === false) */}
+      {shouldShowOvertimeConfirmationModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="overtime-confirm-prompt-title"
+          data-testid="overtime-confirm-prompt-modal"
+          className="no-print fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+        >
+          <div
+            className={`w-full max-w-md rounded-2xl border p-5 sm:p-6 space-y-4 shadow-2xl ${
+              isDark
+                ? 'border-amber-500/40 bg-slate-900 text-slate-100'
+                : 'border-amber-400 bg-white text-slate-900'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-amber-400">
+                    Konfirmasi Jam Lembur · 20:00+ WIB
+                  </span>
+                  <h3
+                    id="overtime-confirm-prompt-title"
+                    className="text-base font-bold font-display mt-0.5"
+                  >
+                    Waktu kerja telah melewati pukul 20:00 WIB. Apakah Anda
+                    sedang lembur?
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Tutup Konfirmasi Lembur"
+                onClick={() => setIsOvertimeConfirmPromptDismissed(true)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className={`text-xs leading-relaxed ${mutedText}`}>
+              Anda tercatat masih <strong>Checked-In</strong> (masuk pukul{' '}
+              <strong className="font-mono text-emerald-400">
+                {activeCurrentUserCheckIn?.checkInTime} WIB
+              </strong>
+              ). Jika tidak ada konfirmasi lembur hingga pukul{' '}
+              <strong className="font-mono text-amber-400">20:20 WIB</strong>,
+              sistem akan melakukan <em>Auto Check-Out</em> secara otomatis.
+            </p>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                data-testid="confirm-overtime-checkout-btn"
+                disabled={isConfirmingOvertime}
+                onClick={() => {
+                  setIsOvertimeConfirmPromptDismissed(true);
+                  handleEvaluateClockOutRule();
+                }}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-rose-600 to-pink-600 hover:opacity-95 flex items-center justify-center gap-1.5 shadow-md"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Check-Out Sekarang</span>
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-overtime-yes-btn"
+                disabled={isConfirmingOvertime}
+                onClick={() => {
+                  void handleConfirmActiveOvertime();
+                }}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-950 bg-gradient-to-r from-amber-400 to-yellow-300 hover:opacity-95 disabled:opacity-60 flex items-center justify-center gap-1.5 shadow-md"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>
+                  {isConfirmingOvertime ? 'Menyimpan...' : 'Ya, Saya Lembur'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Structured PDF & Excel Attendance Report Document Viewer Modal (Strictly Private to Target Employee) */}
       <AttendanceReportViewerModal

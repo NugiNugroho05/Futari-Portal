@@ -3,6 +3,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { runSupabaseKeepAlive } from './api/keep-alive';
+import { runReminderCheckout } from './api/reminder-checkout';
+import { runReminderOvertime } from './api/reminder-overtime';
+import { runAutoEndOvertime } from './api/auto-end-overtime';
 // import { GoogleGenAI, ThinkingLevel, Type, GenerateContentResponse } from '@google/genai';
 
 dotenv.config();
@@ -45,6 +48,48 @@ async function startServer() {
       res.status(500).json({
         ok: false,
         message: error?.message || 'Supabase keep-alive failed',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
+  // 19:00 WIB (12:00 UTC) Checkout Reminder via Resend REST API
+  app.all('/api/reminder-checkout', async (_req, res) => {
+    try {
+      const payload = await runReminderCheckout();
+      res.status(200).json(payload);
+    } catch (error: any) {
+      res.status(500).json({
+        ok: false,
+        message: error?.message || 'Failed to execute 19:00 WIB checkout reminder',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
+  // 20:00 WIB (13:00 UTC) Overtime Confirmation Warning via Resend REST API
+  app.all('/api/reminder-overtime', async (_req, res) => {
+    try {
+      const payload = await runReminderOvertime();
+      res.status(200).json(payload);
+    } catch (error: any) {
+      res.status(500).json({
+        ok: false,
+        message: error?.message || 'Failed to execute 20:00 WIB overtime reminder',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
+  // 20:20 WIB (13:20 UTC) Auto-End Overtime System (auto checks out unconfirmed users)
+  app.all('/api/auto-end-overtime', async (_req, res) => {
+    try {
+      const payload = await runAutoEndOvertime();
+      res.status(200).json(payload);
+    } catch (error: any) {
+      res.status(500).json({
+        ok: false,
+        message: error?.message || 'Failed to execute 20:20 WIB auto-end overtime',
         timestamp: new Date().toISOString(),
       });
     }
