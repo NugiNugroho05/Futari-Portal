@@ -148,6 +148,8 @@ import {
   SupabasePersonnelRow,
   mapSupabasePersonnelToStaffRecord,
   mapSupabasePersonnelListToStaffList,
+  decodePersonnelAvatarUrlAndMetadata,
+  encodePersonnelAvatarUrlWithMetadata,
   SupabaseAttendanceRow,
   isAttendanceRowActiveForToday,
   applyActiveAttendanceToStaffList,
@@ -978,9 +980,9 @@ export default function App() {
   const isExecutiveUser = currentUser.division === 'Executive';
 
   // STRICT RBAC FOR ABSENSI GLOBAL ACCESS DROPDOWN:
-  // Visible if the logged-in user's role is strictly Executive, Finance, or Digital (Dev).
+  // Visible if the logged-in user has global attendance access (Executive, HRD/Izah, Finance, or Digital Dev).
   const canSeeGlobalAttendanceDropdown = useMemo(() => {
-    return hasGlobalRoleAccess(currentUser);
+    return checkCanViewAllAttendance(currentUser);
   }, [currentUser]);
 
   const canViewAllAttendance = canSeeGlobalAttendanceDropdown;
@@ -1339,11 +1341,59 @@ export default function App() {
 
     setIsAuthSubmitting(true);
     try {
-      const { data: authData, error: authError } =
+      let { data: authData, error: authError } =
         await supabase.auth.signInWithPassword({
           email: cleanEmail,
           password: cleanPass,
         });
+
+      // Fallback & auto-migration when Admin changed a user's password via Manage User in `personnel`
+      if (authError || !authData.user) {
+        const matchedStaff = staffList.find(
+          (s) => (s.email || '').trim().toLowerCase() === cleanEmail
+        );
+        const savedPersonnelPass = (matchedStaff?.password || '').trim();
+        if (matchedStaff && savedPersonnelPass && savedPersonnelPass === cleanPass) {
+          // Try authenticating with previous known auth password or legacy default to migrate Supabase Auth password
+          const candidateOldPasswords = Array.from(
+            new Set(
+              [matchedStaff.prevAuthPassword, 'futari2026'].filter(
+                (p): p is string => Boolean(p && p.trim() && p.trim() !== cleanPass)
+              )
+            )
+          );
+          for (const oldPass of candidateOldPasswords) {
+            const retryAuth = await supabase.auth.signInWithPassword({
+              email: cleanEmail,
+              password: oldPass,
+            });
+            if (!retryAuth.error && retryAuth.data.user) {
+              authData = retryAuth.data;
+              authError = null;
+              try {
+                await supabase.auth.updateUser({ password: cleanPass });
+              } catch {
+                // Ignore auth password sync error if restricted
+              }
+              break;
+            }
+          }
+
+          // If Supabase Auth session could not be migrated via old password, still allow login via verified `personnel` password
+          if (authError || !authData.user) {
+            const resolvedStaff = await fetchAndApplySupabasePersonnelProfile(
+              cleanEmail,
+              matchedStaff.id,
+              matchedStaff.name
+            );
+            if (resolvedStaff) {
+              setIsAuthenticated(true);
+              triggerSplashTransition();
+              return;
+            }
+          }
+        }
+      }
 
       if (authError || !authData.user) {
         setLoginError(
@@ -1354,6 +1404,33 @@ export default function App() {
       }
 
       const authenticatedEmail = authData.user.email || cleanEmail;
+      // Persist the user's verified login password into their `personnel` metadata if not yet stored
+      try {
+        const { data: existingRow } = await supabase
+          .from('personnel')
+          .select('id, avatar_url')
+          .ilike('email', authenticatedEmail)
+          .maybeSingle();
+        if (existingRow) {
+          const decoded = decodePersonnelAvatarUrlAndMetadata(existingRow.avatar_url);
+          if (decoded.metadata?.password !== cleanPass) {
+            const nextAvatarUrl = encodePersonnelAvatarUrlWithMetadata(
+              decoded.cleanPhotoUrl,
+              {
+                ...(decoded.metadata || {}),
+                password: cleanPass,
+              }
+            );
+            await supabase
+              .from('personnel')
+              .update({ avatar_url: nextAvatarUrl })
+              .eq('id', existingRow.id);
+          }
+        }
+      } catch {
+        // Non-fatal metadata sync
+      }
+
       const resolvedStaff = await fetchAndApplySupabasePersonnelProfile(
         authenticatedEmail,
         authData.user.id,
@@ -1604,6 +1681,28 @@ export default function App() {
     const cleanEmail = input.email.trim().toLowerCase();
     const cleanRole = input.role.trim();
     const cleanDivision = (input.rawDivision || input.division).trim();
+    const encodedMetaAvatarUrl = encodePersonnelAvatarUrlWithMetadata(null, {
+      roomName: input.roomName,
+      password: input.password?.trim() || undefined,
+    });
+
+    // Resolve supervisor_email if provided
+    let resolvedSupervisorEmail: string | null = null;
+    if (input.supervisor) {
+      const supTrim = input.supervisor.trim();
+      const matchedSup = staffList.find((s) => {
+        const formatted = `${s.name} (${s.role})`;
+        return (
+          s.email.toLowerCase() === supTrim.toLowerCase() ||
+          s.name.toLowerCase() === supTrim.toLowerCase() ||
+          formatted.toLowerCase() === supTrim.toLowerCase() ||
+          supTrim.toLowerCase().startsWith(`${s.name.toLowerCase()} (`)
+        );
+      });
+      if (matchedSup) {
+        resolvedSupervisorEmail = matchedSup.email.toLowerCase();
+      }
+    }
 
     // Technical Note: ONLY insert into the `personnel` table.
     // Do NOT trigger `supabase.auth.signUp` here to prevent client-side session replacement.
@@ -1615,9 +1714,11 @@ export default function App() {
           email: cleanEmail,
           role: cleanRole,
           division: cleanDivision,
+          supervisor_email: resolvedSupervisorEmail,
+          avatar_url: encodedMetaAvatarUrl,
         },
       ])
-      .select('id, created_at, name, email, role, division')
+      .select('id, created_at, name, email, role, division, avatar_url, supervisor_email, status')
       .single();
 
     if (insertError) {
@@ -1643,122 +1744,147 @@ export default function App() {
       return updatedList;
     });
 
-    try {
-      const { data: allRows } = await supabase
-        .from('personnel')
-        .select('id, created_at, name, email, role, division, avatar_url, supervisor_email, status');
-      if (allRows && Array.isArray(allRows)) {
-        const mapped = mapSupabasePersonnelListToStaffList(allRows as SupabasePersonnelRow[]);
-        setStaffList(mapped);
-      }
-    } catch {
-      // Keep optimistic list
-    }
+    await refreshPersonnelDirectory();
   };
 
   const handleSelfServiceUpdateOwnProfile = async (
     updates: SelfServiceProfileUpdateInput
   ) => {
-    // 1. Resolve active target and updated staff record
-    let updatedTarget: StaffMemberRecord | undefined;
-    setStaffList((prev) => {
-      const updated = updateOwnProfileSelfService(
-        prev,
-        currentUser.staffId,
-        updates
-      );
-      updatedTarget = updated.find((s) => s.staffId === currentUser.staffId);
-      if (updatedTarget) {
-        setCurrentUserProfile(updatedTarget);
-      }
-      return updated;
-    });
-
-    // 2. Persist changes to Supabase `personnel` table based on active user's session email/ID
-    try {
-      const activeUser = await tryGetActiveSessionUser();
-      const targetEmail = activeUser?.email || currentUser.email;
-
-      const dbUpdates: Record<string, any> = {};
-      if (updates.name !== undefined) dbUpdates.name = updates.name.trim();
-      if (updates.avatar_url !== undefined) dbUpdates.avatar_url = updates.avatar_url;
-      else if (updates.photoUrl !== undefined) dbUpdates.avatar_url = updates.photoUrl;
-
-      if (updates.supervisor_email !== undefined) {
-        dbUpdates.supervisor_email = updates.supervisor_email;
-      } else if (updates.supervisor !== undefined) {
-        const supTrim = updates.supervisor.trim();
-        if (
-          !supTrim ||
-          supTrim.toLowerCase().includes('board of founders') ||
-          supTrim.toLowerCase().includes('top executive')
-        ) {
-          dbUpdates.supervisor_email = null;
-        } else {
-          const matchedSup = staffList.find((s) => {
-            const formatted = `${s.name} (${s.role})`;
-            return (
-              s.email.toLowerCase() === supTrim.toLowerCase() ||
-              s.name.toLowerCase() === supTrim.toLowerCase() ||
-              formatted.toLowerCase() === supTrim.toLowerCase() ||
-              supTrim.toLowerCase().startsWith(`${s.name.toLowerCase()} (`)
-            );
-          });
-          dbUpdates.supervisor_email = matchedSup ? matchedSup.email.toLowerCase() : null;
-        }
-      }
-
-      if (Object.keys(dbUpdates).length > 0 && targetEmail) {
-        // Attempt update with all provided fields
-        const { error: updateError } = await supabase
-          .from('personnel')
-          .update(dbUpdates)
-          .ilike('email', targetEmail);
-
-        // If the 'supervisor' column does not exist yet in Supabase schema cache (PGRST204 / 42703),
-        // fallback gracefully by updating known columns (name, avatar_url)
-        if (
-          updateError &&
-          (updateError.code === 'PGRST204' ||
-            updateError.code === '42703' ||
-            updateError.message?.toLowerCase().includes('supervisor')) &&
-          dbUpdates.supervisor
-        ) {
-          const { supervisor: _, ...fallbackUpdates } = dbUpdates;
-          if (Object.keys(fallbackUpdates).length > 0) {
-            await supabase
-              .from('personnel')
-              .update(fallbackUpdates)
-              .ilike('email', targetEmail);
-          }
-        }
-
-        // Persist supervisor and name in Supabase Auth user_metadata
-        try {
-          const authUserUpdates: any = {
-            data: {
-              name: updates.name ? updates.name.trim() : undefined,
-              full_name: updates.name ? updates.name.trim() : undefined,
-              supervisor: updates.supervisor ? updates.supervisor.trim() : undefined,
-            },
-          };
-          if (updates.password && updates.password.trim()) {
-            authUserUpdates.password = updates.password.trim();
-          }
-          await supabase.auth.updateUser(authUserUpdates);
-        } catch {
-          // Ignore auth metadata update if offline
-        }
-      }
-
-      // Re-fetch personnel directory to keep global state synchronized
-      if (targetEmail) {
-        await fetchAndApplySupabasePersonnelProfile(targetEmail);
-      }
-      await refreshPersonnelDirectory();
-    } catch {
-      // Local state is already updated optimistically
+    const activeUser = await tryGetActiveSessionUser();
+    const targetEmail = (activeUser?.email || currentUser.email || '').trim().toLowerCase();
+    if (!targetEmail) {
+      throw new Error('Tidak dapat menemukan email akun aktif untuk menyimpan profil.');
     }
+
+    // Calculate next target record with all self-service fields merged
+    const updatedList = updateOwnProfileSelfService(
+      staffList,
+      currentUser.staffId,
+      updates
+    );
+    const updatedTarget =
+      updatedList.find((s) => s.staffId === currentUser.staffId) || currentUser;
+
+    // Determine clean base photo URL & extended metadata for `personnel.avatar_url`
+    const existingDecoded = decodePersonnelAvatarUrlAndMetadata(
+      currentUser.avatar_url || currentUser.photoUrl
+    );
+    let basePhotoUrl = existingDecoded.cleanPhotoUrl;
+    if (updates.avatar_url !== undefined) {
+      basePhotoUrl = decodePersonnelAvatarUrlAndMetadata(updates.avatar_url).cleanPhotoUrl;
+    } else if (updates.photoUrl !== undefined) {
+      basePhotoUrl = decodePersonnelAvatarUrlAndMetadata(updates.photoUrl).cleanPhotoUrl;
+    }
+
+    const nextPassword =
+      updates.password !== undefined && updates.password.trim()
+        ? updates.password.trim()
+        : updatedTarget.password || existingDecoded.metadata?.password || undefined;
+
+    const mergedMeta = {
+      ...(existingDecoded.metadata || {}),
+      roomName: updates.roomName ?? updatedTarget.roomName ?? currentUser.roomName,
+      branch: updates.branch ?? updatedTarget.branch ?? currentUser.branch,
+      password: nextPassword,
+      avatarColor:
+        updates.avatarColor ?? updatedTarget.avatarColor ?? currentUser.avatarColor,
+      avatar3DConfig:
+        updates.avatar3DConfig ??
+        updatedTarget.avatar3DConfig ??
+        currentUser.avatar3DConfig,
+      allowedAttendanceViewerIds:
+        updates.allowedAttendanceViewerIds ??
+        updatedTarget.allowedAttendanceViewerIds ??
+        currentUser.allowedAttendanceViewerIds,
+    };
+
+    const dbUpdates: Record<string, any> = {
+      avatar_url: encodePersonnelAvatarUrlWithMetadata(basePhotoUrl, mergedMeta),
+    };
+    if (updates.name !== undefined && updates.name.trim()) {
+      dbUpdates.name = updates.name.trim();
+    }
+
+    if (updates.supervisor_email !== undefined) {
+      dbUpdates.supervisor_email = updates.supervisor_email;
+    } else if (updates.supervisor !== undefined) {
+      const supTrim = updates.supervisor.trim();
+      if (
+        !supTrim ||
+        supTrim.toLowerCase().includes('board of founders') ||
+        supTrim.toLowerCase().includes('top executive')
+      ) {
+        dbUpdates.supervisor_email = null;
+      } else {
+        const matchedSup = staffList.find((s) => {
+          const formatted = `${s.name} (${s.role})`;
+          return (
+            s.email.toLowerCase() === supTrim.toLowerCase() ||
+            s.name.toLowerCase() === supTrim.toLowerCase() ||
+            formatted.toLowerCase() === supTrim.toLowerCase() ||
+            supTrim.toLowerCase().startsWith(`${s.name.toLowerCase()} (`)
+          );
+        });
+        dbUpdates.supervisor_email = matchedSup
+          ? matchedSup.email.toLowerCase()
+          : null;
+      }
+    }
+
+    // 1. Persist to Supabase `personnel` table and throw on failure so UI displays exact error
+    const { data: updatedRows, error: updateError } = await supabase
+      .from('personnel')
+      .update(dbUpdates)
+      .ilike('email', targetEmail)
+      .select('id, created_at, name, email, role, division, avatar_url, supervisor_email, status');
+
+    if (updateError) {
+      throw new Error(
+        updateError.message || 'Gagal menyimpan perubahan profil ke Supabase.'
+      );
+    }
+    if (!updatedRows || updatedRows.length === 0) {
+      throw new Error(
+        `Record personel (${targetEmail}) tidak ditemukan atau tidak ter-update di Supabase.`
+      );
+    }
+
+    // 2. Sync password & user_metadata to Supabase Auth if an active Auth session is present
+    if (activeUser) {
+      const authUserUpdates: {
+        password?: string;
+        data?: Record<string, any>;
+      } = {
+        data: {
+          name: updates.name ? updates.name.trim() : updatedTarget.name,
+          full_name: updates.name ? updates.name.trim() : updatedTarget.name,
+          supervisor: updates.supervisor
+            ? updates.supervisor.trim()
+            : updatedTarget.supervisor,
+        },
+      };
+      if (
+        updates.password &&
+        updates.password.trim() &&
+        updates.password.trim() !== (currentUser.password || '').trim()
+      ) {
+        authUserUpdates.password = updates.password.trim();
+      }
+      const { error: authUpdateErr } = await supabase.auth.updateUser(
+        authUserUpdates
+      );
+      if (authUpdateErr && authUserUpdates.password) {
+        throw new Error(
+          `Profil tersimpan, namun gagal memperbarui password autentikasi: ${authUpdateErr.message}`
+        );
+      }
+    }
+
+    // 3. Apply optimistic state and immediately refresh from Supabase Single Source of Truth
+    setStaffList(updatedList);
+    setCurrentUserProfile(updatedTarget);
+    await fetchAndApplySupabasePersonnelProfile(targetEmail);
+    await refreshPersonnelDirectory();
   };
 
   // Global refresh function to fetch latest personnel from Supabase and synchronize staffList
@@ -1796,13 +1922,58 @@ export default function App() {
     );
     const target = updatedList.find((s) => s.staffId === targetStaffId);
 
+    const existingDecoded = decodePersonnelAvatarUrlAndMetadata(
+      targetBefore?.avatar_url || targetBefore?.photoUrl
+    );
+    let basePhotoUrl = existingDecoded.cleanPhotoUrl;
+    if (target?.photoUrl !== undefined) {
+      basePhotoUrl = decodePersonnelAvatarUrlAndMetadata(target.photoUrl).cleanPhotoUrl;
+    }
+
+    const cleanUpdatedPass =
+      updates.password !== undefined && updates.password.trim()
+        ? updates.password.trim()
+        : target?.password ||
+          targetBefore?.password ||
+          existingDecoded.metadata?.password ||
+          undefined;
+
+    const prevPassBeforeChange =
+      targetBefore?.password || existingDecoded.metadata?.password;
+    const prevAuthPassword =
+      cleanUpdatedPass &&
+      prevPassBeforeChange &&
+      cleanUpdatedPass !== prevPassBeforeChange
+        ? prevPassBeforeChange
+        : existingDecoded.metadata?.prevAuthPassword;
+
+    const mergedMeta = {
+      ...(existingDecoded.metadata || {}),
+      roomName: updates.roomName ?? target?.roomName ?? targetBefore?.roomName,
+      branch: updates.branch ?? target?.branch ?? targetBefore?.branch,
+      password: cleanUpdatedPass,
+      prevAuthPassword,
+      avatarColor:
+        updates.avatarColor ?? target?.avatarColor ?? targetBefore?.avatarColor,
+      avatar3DConfig:
+        updates.avatar3DConfig ??
+        target?.avatar3DConfig ??
+        targetBefore?.avatar3DConfig,
+      allowedAttendanceViewerIds:
+        target?.allowedAttendanceViewerIds ??
+        targetBefore?.allowedAttendanceViewerIds,
+    };
+
     const updatePayload: {
       name?: string;
       email?: string;
       role?: string;
       division?: string;
       supervisor_email?: string | null;
-    } = {};
+      avatar_url?: string | null;
+    } = {
+      avatar_url: encodePersonnelAvatarUrlWithMetadata(basePhotoUrl, mergedMeta),
+    };
 
     if (updates.name !== undefined) updatePayload.name = updates.name.trim();
     if (updates.email !== undefined) updatePayload.email = updates.email.trim().toLowerCase();
@@ -1849,10 +2020,15 @@ export default function App() {
       updateQuery = updateQuery.ilike('email', targetEmail);
     }
 
-    const { error: updateError } = await updateQuery;
+    const { data: updatedRows, error: updateError } = await updateQuery.select(
+      'id, created_at, name, email, role, division, avatar_url, supervisor_email, status'
+    );
     if (updateError) {
       console.error('Failed to update personnel in Supabase:', updateError);
       throw new Error(updateError.message || 'Gagal menyimpan data user ke Supabase.');
+    }
+    if (!updatedRows || updatedRows.length === 0) {
+      throw new Error('Data user tidak ditemukan atau tidak ter-update di tabel personnel Supabase.');
     }
 
     // 2. Persist Team Members Assignment (update supervisor_email in Supabase)
@@ -1870,29 +2046,27 @@ export default function App() {
 
         if (isSelected) {
           // Set supervisor_email = targetEmail
-          try {
-            let q = supabase.from('personnel').update({ supervisor_email: targetEmail.toLowerCase() });
-            if (staff.id && !String(staff.id).startsWith('sup_') && !String(staff.id).startsWith('usr_')) {
-              q = q.eq('id', staff.id);
-            } else if (staff.email) {
-              q = q.ilike('email', staff.email);
-            }
-            await q;
-          } catch (e) {
-            console.warn('[Supabase team assign error]:', e);
+          let q = supabase.from('personnel').update({ supervisor_email: targetEmail.toLowerCase() });
+          if (staff.id && !String(staff.id).startsWith('sup_') && !String(staff.id).startsWith('usr_')) {
+            q = q.eq('id', staff.id);
+          } else if (staff.email) {
+            q = q.ilike('email', staff.email);
+          }
+          const { error: assignErr } = await q;
+          if (assignErr) {
+            throw new Error(`Gagal menyimpan Team Member (${staff.name}): ${assignErr.message}`);
           }
         } else if (wasDirectReport && !isSelected) {
           // Deselected: clear supervisor_email = null
-          try {
-            let q = supabase.from('personnel').update({ supervisor_email: null });
-            if (staff.id && !String(staff.id).startsWith('sup_') && !String(staff.id).startsWith('usr_')) {
-              q = q.eq('id', staff.id);
-            } else if (staff.email) {
-              q = q.ilike('email', staff.email);
-            }
-            await q;
-          } catch (e) {
-            console.warn('[Supabase team unassign error]:', e);
+          let q = supabase.from('personnel').update({ supervisor_email: null });
+          if (staff.id && !String(staff.id).startsWith('sup_') && !String(staff.id).startsWith('usr_')) {
+            q = q.eq('id', staff.id);
+          } else if (staff.email) {
+            q = q.ilike('email', staff.email);
+          }
+          const { error: unassignErr } = await q;
+          if (unassignErr) {
+            throw new Error(`Gagal menghapus Team Member (${staff.name}): ${unassignErr.message}`);
           }
         }
       }
@@ -1902,7 +2076,14 @@ export default function App() {
     if (updates.password && updates.password.trim()) {
       const cleanNewPassword = updates.password.trim();
       try {
-        if ((supabase.auth as any).admin && targetId) {
+        // If the edited user is the currently logged-in user, update their active Supabase Auth password directly
+        if (
+          targetEmail &&
+          currentUser.email &&
+          targetEmail.toLowerCase() === currentUser.email.toLowerCase()
+        ) {
+          await supabase.auth.updateUser({ password: cleanNewPassword });
+        } else if ((supabase.auth as any).admin && targetId) {
           await (supabase.auth as any).admin.updateUserById(targetId, {
             password: cleanNewPassword,
           });
@@ -1922,6 +2103,13 @@ export default function App() {
 
     // Refresh personnel list directly from database to ensure 100% data parity
     await refreshPersonnelDirectory();
+    if (
+      targetEmail &&
+      currentUserProfile &&
+      targetEmail.toLowerCase() === currentUserProfile.email.toLowerCase()
+    ) {
+      await fetchAndApplySupabasePersonnelProfile(targetEmail);
+    }
     return true;
   };
 
@@ -6747,6 +6935,8 @@ export default function App() {
               payrollCycleLabel={payrollCycle.label}
               onOpenStructuredPdfModal={() => setIsReportViewerOpen(true)}
               isDark={isDark}
+              selectedAttendanceTargetId={targetAttendanceEmployee.staffId}
+              onSelectAttendanceTargetId={setSelectedAttendanceTargetId}
             />
           )}
 

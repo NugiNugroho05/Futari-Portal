@@ -96,6 +96,11 @@ import {
   canAccessTeamAttendanceTab,
   getTeamDashboardPersonnel,
   buildTeamDashboardExportLogs,
+  decodePersonnelAvatarUrlAndMetadata,
+  encodePersonnelAvatarUrlWithMetadata,
+  mapSupabasePersonnelListToStaffList,
+  computeRoomGridDeskCoords,
+  assignRoomGridCoordinatesToStaffList,
 } from './futariLogic';
 
 test('Database updates: Dina Pratiwi is completely removed, Andri and Tohir (Talent Leaders, JKT) are added', () => {
@@ -1603,6 +1608,105 @@ test('FINAL PRODUCTION PREPARATION — Complete Data Wipe, Root Superadmin Seed,
   assert.equal(canManageFleetVehicles(pmUser), false);
   assert.equal(canManageFleetVehicles(financeUser), false);
 });
+
+test('Post-Launch Fixes: Supabase profile metadata sync, password roundtrip without hardcoded futari2026, 3D room auto-grid non-overlapping coordinates, and HRD (Izah) & Finance global attendance RBAC', () => {
+  // 1. Metadata encoding/decoding roundtrip (roomName, password, avatar3DConfig)
+  const rawAvatarWithMeta = encodePersonnelAvatarUrlWithMetadata(
+    'https://example.com/photo.jpg',
+    {
+      roomName: 'Ruangan Production & HRD',
+      branch: 'JKT',
+      password: 'izahCustomPass2026',
+      avatarColor: '#EC4899',
+      avatar3DConfig: {
+        shirtColor: '#EC4899',
+        hairStyle: 'long',
+        hairColor: '#1E293B',
+        useHijab: true,
+        hijabColor: '#F472B6',
+      },
+    }
+  );
+  const decoded = decodePersonnelAvatarUrlAndMetadata(rawAvatarWithMeta);
+  assert.equal(decoded.cleanPhotoUrl, 'https://example.com/photo.jpg');
+  assert.equal(decoded.meta.roomName, 'Ruangan Production & HRD');
+  assert.equal(decoded.meta.password, 'izahCustomPass2026');
+  assert.equal(decoded.meta.avatar3DConfig?.useHijab, true);
+
+  // 2. Mapping Supabase rows: Izah defaults to HRD & Ruangan Production & HRD, and passwords are not hardcoded to futari2026
+  const mappedRows = mapSupabasePersonnelListToStaffList([
+    {
+      id: 27,
+      name: 'Izah',
+      email: 'izah.futari@gmail.com',
+      role: 'HRD',
+      division: 'HRD',
+      avatar_url: rawAvatarWithMeta,
+      supervisor_email: 'hilda.futari@gmail.com',
+      status: 'active',
+    },
+    {
+      id: 12,
+      name: 'Tiara',
+      email: 'tiarafutari20@gmail.com',
+      role: 'Production',
+      division: 'Production',
+      avatar_url: null,
+      supervisor_email: 'hilda.futari@gmail.com',
+      status: 'active',
+    },
+    {
+      id: 18,
+      name: 'Erlita',
+      email: 'erlita.futari@gmail.com',
+      role: 'Staff',
+      division: 'Finance',
+      avatar_url: null,
+      supervisor_email: 'hilda.futari@gmail.com',
+      status: 'active',
+    },
+  ]);
+
+  const izah = mappedRows.find((s) => s.email === 'izah.futari@gmail.com')!;
+  const tiara = mappedRows.find((s) => s.email === 'tiarafutari20@gmail.com')!;
+  const erlitaFinance = mappedRows.find((s) => s.email === 'erlita.futari@gmail.com')!;
+
+  assert.equal(izah.role, 'HRD');
+  assert.equal(izah.division, 'HRD');
+  assert.equal(izah.roomName, 'Ruangan Production & HRD');
+  assert.equal(izah.password, 'izahCustomPass2026');
+  assert.equal(izah.photoUrl, 'https://example.com/photo.jpg');
+  // Unset password on Supabase row is undefined, NOT hardcoded 'futari2026'
+  assert.equal(tiara.password, undefined);
+
+  // 3. 3D Virtual Office Auto-Grid Layout: avatars in the same room get distinct, non-overlapping coordinates
+  assert.equal(tiara.roomName, 'Ruangan Production & HRD');
+  assert.notDeepEqual(
+    izah.deskCoords,
+    tiara.deskCoords,
+    'Avatars in Ruangan Production & HRD must not stack at the same coordinates'
+  );
+  const grid4 = [0, 1, 2, 3].map((slot) =>
+    computeRoomGridDeskCoords('Ruangan Creative/Design', slot, 4)
+  );
+  const uniqueCoordKeys = new Set(grid4.map((c) => `${c.x},${c.z}`));
+  assert.equal(uniqueCoordKeys.size, 4, 'All 4 slots in a 2x2 room grid must have unique (x, z) coordinates');
+
+  // 4. Full Global Attendance RBAC for HRD (Izah) and Finance Division
+  assert.equal(canViewAllAttendance(izah), true, 'HRD (Izah) must have full global attendance access');
+  assert.equal(canViewAllAttendance(erlitaFinance), true, 'Finance division must have full global attendance access');
+  assert.equal(
+    getAccessibleAttendancePersonnel(izah, mappedRows).length,
+    mappedRows.length,
+    'HRD (Izah) can view all personnel in attendance selectors and Team Management'
+  );
+  assert.equal(
+    getAccessibleAttendancePersonnel(erlitaFinance, mappedRows).length,
+    mappedRows.length,
+    'Finance division can view all personnel in attendance selectors and Team Management'
+  );
+});
+
 
 
 

@@ -67,6 +67,7 @@ export interface StaffMemberRecord {
   avatar3DConfig?: Avatar3DConfig;
   allowedAttendanceViewerIds?: string[];
   supervisor_email?: string | null;
+  prevAuthPassword?: string;
 }
 
 export interface SupabasePersonnelRow {
@@ -1245,9 +1246,10 @@ export function filterVisiblePettyCashExpenses(
 
 /**
  * STRICT ATTENDANCE RBAC (TEAM vs GLOBAL):
- * - Global Access: Users with roles `Executive` (Hildasari, M Rio Antoni), `Finance` (Erlita, Novita),
- *   and explicitly the Developer `Digital` (Nugi Nugroho, email: nuginugroho2005@gmail.com) have
- *   UNRESTRICTED GLOBAL ACCESS to inspect and export ANY employee's attendance record.
+ * - Global Access: Users with Role or Division `Executive` (Hildasari, M Rio Antoni), `Finance` (Erlita, Novita),
+ *   `HRD` (Izah, Yanti), and Developer `Digital` (Nugi Nugroho, email: nuginugroho2005@gmail.com) have
+ *   UNRESTRICTED GLOBAL ACCESS to inspect and export ANY employee's attendance record across
+ *   Absensi, Team Management, and User Profile attendance recaps.
  * - Team Access: All other users (PMs, PICs, TLs, Admins, etc.) can ONLY view their own attendance
  *   records AND the records of personnel who share their exact `division` or have them listed as
  *   their `supervisor`. They must NOT see attendance data from outside their team.
@@ -1256,20 +1258,37 @@ export function canViewAllAttendance(currentUser: StaffMemberRecord): boolean {
   if (!currentUser) return false;
   if (hasGlobalRoleAccess(currentUser)) return true;
   const cleanEmail = (currentUser.email || '').trim().toLowerCase();
+  const roleNorm = (currentUser.role || '').trim().toLowerCase();
+  const divNorm = String(currentUser.division || '').trim().toLowerCase();
+  const divLabelNorm = (currentUser.divisionLabel || '').trim().toLowerCase();
+
   return (
-    currentUser.role === 'Executive' ||
-    currentUser.role === 'Finance' ||
-    currentUser.role === 'Digital' ||
+    roleNorm === 'executive' ||
+    roleNorm === 'finance' ||
+    roleNorm === 'hrd' ||
+    roleNorm.includes('hrd') ||
+    roleNorm.includes('human resource') ||
+    roleNorm.includes('finance') ||
+    roleNorm === 'digital' ||
+    roleNorm === 'founder & ceo' ||
+    roleNorm === 'operational' ||
+    roleNorm === 'operasional' ||
+    divNorm === 'executive' ||
+    divNorm === 'finance' ||
+    divNorm === 'hrd' ||
+    divNorm.includes('hrd') ||
+    (divNorm.includes('finance') && divNorm !== 'admin_finance') ||
+    divLabelNorm === 'hrd' ||
+    divLabelNorm === 'finance' ||
     cleanEmail === 'nuginugroho2005@gmail.com' ||
-    currentUser.division === 'Executive' ||
-    currentUser.role === 'Founder & CEO' ||
-    currentUser.role === 'Operational' ||
+    cleanEmail === 'izah.futari@gmail.com' ||
     currentUser.id === '1' ||
     currentUser.staffId === '1' ||
     currentUser.staffId === 'exec_hildasari' ||
     currentUser.staffId === 'exec_rio' ||
     currentUser.staffId === 'fin_erlita' ||
     currentUser.staffId === 'fin_novita' ||
+    currentUser.staffId === 'hrd_iza' ||
     currentUser.staffId === 'des_nugi'
   );
 }
@@ -1323,15 +1342,31 @@ export function filterAttendanceLogsForUser(
 ): AttendanceRecord[] {
   const accessibleStaff = getAccessibleAttendancePersonnel(currentUser, staffList);
   const accessibleIds = new Set(accessibleStaff.map((s) => s.staffId));
+  const accessibleEmails = new Set(
+    accessibleStaff
+      .map((s) => (s.email || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
 
   if (!selectedTargetStaffId || selectedTargetStaffId === 'ALL_ACCESSIBLE') {
-    return allLogs.filter((log) => accessibleIds.has(log.staffId));
+    return allLogs.filter(
+      (log) =>
+        accessibleIds.has(log.staffId) ||
+        (log.email && accessibleEmails.has(log.email.trim().toLowerCase()))
+    );
   }
 
   const effectiveStaffId = accessibleIds.has(selectedTargetStaffId)
     ? selectedTargetStaffId
     : currentUser.staffId;
-  return allLogs.filter((log) => log.staffId === effectiveStaffId);
+  const targetMember = accessibleStaff.find((s) => s.staffId === effectiveStaffId);
+  const targetEmail = (targetMember?.email || '').trim().toLowerCase();
+
+  return allLogs.filter(
+    (log) =>
+      log.staffId === effectiveStaffId ||
+      (targetEmail && (log.email || '').trim().toLowerCase() === targetEmail)
+  );
 }
 
 /**
@@ -1357,6 +1392,10 @@ export function sharesSameSupervisor(
   personB: StaffMemberRecord
 ): boolean {
   if (!personA || !personB) return false;
+  const supEmailA = (personA.supervisor_email || '').trim().toLowerCase();
+  const supEmailB = (personB.supervisor_email || '').trim().toLowerCase();
+  if (supEmailA && supEmailB && supEmailA === supEmailB) return true;
+
   const rawA = (personA.supervisor || '').trim().toLowerCase();
   const rawB = (personB.supervisor || '').trim().toLowerCase();
   if (!rawA || !rawB) return false;
@@ -1368,7 +1407,7 @@ export function sharesSameSupervisor(
 
 /**
  * DYNAMIC RBAC FILTERING LOGIC FOR "TIM & ABSENSI" (TEAM DASHBOARD):
- * - Global View: If the logged-in user is `Executive`, `Finance`, or `Digital` (email: nuginugroho2005@gmail.com),
+ * - Global View: If the logged-in user is `Executive`, `Finance`, `HRD` (including Izah), or `Digital` (email: nuginugroho2005@gmail.com),
  *   they can see and export the attendance data of ALL company personnel.
  * - Team View (For Everyone Else): If the user is a `PM`, `PIC`, `Admin`, or any other role,
  *   they MUST ONLY see their own attendance data AND the data of their direct team members
@@ -1419,13 +1458,33 @@ export function buildTeamDashboardExportLogs(
       : baseVisibleStaff;
 
   const allowedIds = new Set(filteredStaff.map((s) => s.staffId));
-  const matchingActualLogs = allLogs.filter((l) => allowedIds.has(l.staffId));
+  const allowedEmails = new Set(
+    filteredStaff
+      .map((s) => (s.email || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const matchingActualLogs = allLogs.filter(
+    (l) =>
+      allowedIds.has(l.staffId) ||
+      (l.email && allowedEmails.has(l.email.trim().toLowerCase()))
+  );
 
   const logsByStaff = new Set(matchingActualLogs.map((l) => l.staffId));
+  const logsByEmail = new Set(
+    matchingActualLogs
+      .map((l) => (l.email || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
   const synthesizedLogs: AttendanceRecord[] = [];
 
   for (const member of filteredStaff) {
-    if (logsByStaff.has(member.staffId)) continue;
+    const memberEmail = (member.email || '').trim().toLowerCase();
+    if (
+      logsByStaff.has(member.staffId) ||
+      (memberEmail && logsByEmail.has(memberEmail))
+    ) {
+      continue;
+    }
     const checkIn =
       member.checkInTime && member.checkInTime !== '-'
         ? member.checkInTime
@@ -1442,6 +1501,7 @@ export function buildTeamDashboardExportLogs(
       staffName: member.name,
       role: member.role,
       branch: member.branch,
+      email: memberEmail || undefined,
       date: referenceDate,
       mode: member.workMode === 'WFE' ? 'WFE' : 'WFO',
       checkInTime: checkIn,
@@ -2786,10 +2846,12 @@ export interface SelfServiceProfileUpdateInput {
   supervisor?: string;
   supervisor_email?: string | null;
   roomName?: VirtualOfficeRoomName;
+  branch?: BranchType;
   avatarColor?: string;
   photoUrl?: string;
   avatar_url?: string | null;
   avatar3DConfig?: Partial<Avatar3DConfig>;
+  allowedAttendanceViewerIds?: string[];
 }
 
 function computeInitialsFromName(name: string): string {
@@ -2800,22 +2862,106 @@ function computeInitialsFromName(name: string): string {
   return name.trim().slice(0, 2).toUpperCase() || 'FT';
 }
 
-function computeDeskCoordsForRoom(
+/**
+ * Computes a proportional, non-overlapping 2D Grid position (X, Z) inside a room's floorBounds
+ * based on the avatar's `slotIndexInRoom` (0-indexed) and `totalInRoom`.
+ * Ensures 3D avatars in the same room stand side-by-side in a neat 1x2, 2x2, or 3x3 grid
+ * and NEVER stack on top of each other at the same coordinate.
+ */
+export function computeRoomGridDeskCoords(
   roomName: VirtualOfficeRoomName,
-  seedIndex: number
+  slotIndexInRoom: number,
+  totalInRoom: number = 4
 ): { x: number; z: number } {
   const roomDef =
     VIRTUAL_OFFICE_ROOMS.find((r) => r.roomName === roomName) ||
     VIRTUAL_OFFICE_ROOMS[0];
-  const offsetAngle = (seedIndex % 8) * (Math.PI / 4);
+  const { centerX, centerZ, width, depth } = roomDef.floorBounds;
+
+  const safeTotal = Math.max(1, totalInRoom);
+  const safeIdx = Math.max(0, slotIndexInRoom);
+
+  if (safeTotal === 1) {
+    return {
+      x: Math.round(centerX * 100) / 100,
+      z: Math.round(centerZ * 100) / 100,
+    };
+  }
+
+  const cols = safeTotal <= 2 ? 2 : safeTotal <= 4 ? 2 : 3;
+  const rows = Math.max(1, Math.ceil(safeTotal / cols));
+
+  const col = safeIdx % cols;
+  const row = Math.floor(safeIdx / cols) % rows;
+
+  // Keep comfortable margin from room partition walls so desk + chair + avatar fit cleanly
+  const usableWidth = Math.max(2.0, width - 2.2);
+  const usableDepth = Math.max(1.4, depth - 1.5);
+
+  const stepX = cols > 1 ? Math.min(2.5, usableWidth / (cols - 1)) : 0;
+  const stepZ = rows > 1 ? Math.min(1.65, usableDepth / (rows - 1)) : 0;
+
+  const offsetX = (col - (cols - 1) / 2) * stepX;
+  const offsetZ = (row - (rows - 1) / 2) * stepZ;
+
   return {
-    x:
-      Math.round((roomDef.floorBounds.centerX + Math.cos(offsetAngle) * 1.4) * 10) /
-      10,
-    z:
-      Math.round((roomDef.floorBounds.centerZ + Math.sin(offsetAngle) * 1.1) * 10) /
-      10,
+    x: Math.round((centerX + offsetX) * 100) / 100,
+    z: Math.round((centerZ + offsetZ) * 100) / 100,
   };
+}
+
+/**
+ * Groups personnel by their assigned `roomName` and assigns each member a distinct,
+ * non-overlapping 2D Grid coordinate (`deskCoords`) inside that room.
+ * Active WFO members in each room are grouped together first so currently checked-in
+ * 3D avatars always form a balanced, centered grid inside their room.
+ */
+export function assignRoomGridCoordinatesToStaffList(
+  staffList: StaffMemberRecord[]
+): StaffMemberRecord[] {
+  const activeWfoByRoom = new Map<VirtualOfficeRoomName, string[]>();
+  const inactiveByRoom = new Map<VirtualOfficeRoomName, string[]>();
+
+  for (const person of staffList) {
+    const room = person.roomName || 'Ruangan Creative/Design';
+    if (person.workMode === 'WFO' && !person.isSuspended) {
+      const arr = activeWfoByRoom.get(room) || [];
+      arr.push(person.staffId);
+      activeWfoByRoom.set(room, arr);
+    } else {
+      const arr = inactiveByRoom.get(room) || [];
+      arr.push(person.staffId);
+      inactiveByRoom.set(room, arr);
+    }
+  }
+
+  return staffList.map((person) => {
+    const room = person.roomName || 'Ruangan Creative/Design';
+    const wfoIds = activeWfoByRoom.get(room) || [];
+    const inactiveIds = inactiveByRoom.get(room) || [];
+
+    if (person.workMode === 'WFO' && !person.isSuspended) {
+      const slotIdx = Math.max(0, wfoIds.indexOf(person.staffId));
+      return {
+        ...person,
+        deskCoords: computeRoomGridDeskCoords(room, slotIdx, wfoIds.length),
+      };
+    }
+
+    const allIds = [...wfoIds, ...inactiveIds];
+    const slotIdx = Math.max(0, allIds.indexOf(person.staffId));
+    return {
+      ...person,
+      deskCoords: computeRoomGridDeskCoords(room, slotIdx, allIds.length),
+    };
+  });
+}
+
+function computeDeskCoordsForRoom(
+  roomName: VirtualOfficeRoomName,
+  seedIndex: number
+): { x: number; z: number } {
+  return computeRoomGridDeskCoords(roomName, seedIndex % 6, 6);
 }
 
 /**
@@ -3238,13 +3384,160 @@ export function normalizeSupabaseDivision(
   return 'Design_Talent_Production';
 }
 
+export interface PersonnelExtendedMetadata {
+  roomName?: VirtualOfficeRoomName;
+  branch?: BranchType;
+  password?: string;
+  prevAuthPassword?: string;
+  avatarColor?: string;
+  avatar3DConfig?: Partial<Avatar3DConfig>;
+  allowedAttendanceViewerIds?: string[];
+}
+
+const PERSONNEL_META_HASH_PREFIX = '#futari_meta=';
+
+export function normalizeVirtualOfficeRoomName(
+  rawRoom?: string | null
+): VirtualOfficeRoomName | undefined {
+  if (!rawRoom) return undefined;
+  const trimmed = rawRoom.trim();
+  const exact = VIRTUAL_OFFICE_ROOMS.find(
+    (r) => r.roomName.toLowerCase() === trimmed.toLowerCase()
+  );
+  if (exact) return exact.roomName;
+
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('hrd') || lower.includes('production')) {
+    return 'Ruangan Production & HRD';
+  }
+  if (lower.includes('creative') || lower.includes('design')) {
+    return 'Ruangan Creative/Design';
+  }
+  if (lower.includes('ade')) {
+    return 'Ruangan PM (Team Bu Ade)';
+  }
+  if (lower.includes('ristanto')) {
+    return 'Ruangan PM (Team Pak Ristanto)';
+  }
+  if (lower.includes('gusman')) {
+    return 'Ruangan PM (Team Mas Gusman)';
+  }
+  if (lower.includes('executive') || lower.includes('hilda')) {
+    return 'Ruangan Executive (Team Bu Hilda)';
+  }
+  if (lower.includes('finance')) {
+    return 'Ruangan Finance';
+  }
+  if (lower.includes('operational') || lower.includes('operasional')) {
+    return 'Ruangan Operational';
+  }
+  if (lower.includes('bandung')) {
+    return 'Cabang Bandung';
+  }
+  return undefined;
+}
+
+/**
+ * Decodes `avatar_url` from Supabase `personnel`, separating any clean image URL
+ * from embedded extended profile metadata (`roomName`, `branch`, `password`, `avatar3DConfig`, etc.).
+ */
+export function decodePersonnelAvatarUrlAndMetadata(
+  rawAvatarUrl?: string | null
+): {
+  cleanPhotoUrl: string | null;
+  meta: PersonnelExtendedMetadata;
+  metadata: PersonnelExtendedMetadata;
+} {
+  if (!rawAvatarUrl) {
+    return { cleanPhotoUrl: null, meta: {}, metadata: {} };
+  }
+  const str = String(rawAvatarUrl).trim();
+  const hashIdx = str.indexOf(PERSONNEL_META_HASH_PREFIX);
+  if (hashIdx === -1) {
+    return { cleanPhotoUrl: str || null, meta: {}, metadata: {} };
+  }
+
+  const basePhoto = str.slice(0, hashIdx).trim();
+  const encodedJson = str.slice(hashIdx + PERSONNEL_META_HASH_PREFIX.length);
+  let meta: PersonnelExtendedMetadata = {};
+  try {
+    const parsed = JSON.parse(decodeURIComponent(encodedJson));
+    if (parsed && typeof parsed === 'object') {
+      const normalizedRoom = normalizeVirtualOfficeRoomName(parsed.roomName);
+      meta = {
+        ...parsed,
+        roomName: normalizedRoom || undefined,
+      };
+    }
+  } catch {
+    meta = {};
+  }
+
+  return {
+    cleanPhotoUrl: basePhoto.length > 0 ? basePhoto : null,
+    meta,
+    metadata: meta,
+  };
+}
+
+/**
+ * Encodes extended profile metadata (`roomName`, `branch`, `password`, `avatar3DConfig`, etc.)
+ * alongside `cleanPhotoUrl` into the `avatar_url` column of the Supabase `personnel` table.
+ */
+export function encodePersonnelAvatarUrlWithMetadata(
+  cleanPhotoUrl: string | null | undefined,
+  meta: PersonnelExtendedMetadata
+): string | null {
+  const { cleanPhotoUrl: strippedBase, meta: existingMeta } =
+    decodePersonnelAvatarUrlAndMetadata(cleanPhotoUrl);
+
+  const mergedMeta: PersonnelExtendedMetadata = {
+    ...existingMeta,
+    ...meta,
+  };
+
+  if (mergedMeta.roomName) {
+    mergedMeta.roomName =
+      normalizeVirtualOfficeRoomName(mergedMeta.roomName) ||
+      mergedMeta.roomName;
+  }
+
+  // Clean undefined keys
+  const compactMeta: Record<string, any> = {};
+  for (const [k, v] of Object.entries(mergedMeta)) {
+    if (v !== undefined && v !== '') {
+      compactMeta[k] = v;
+    }
+  }
+
+  const baseStr = strippedBase || '';
+  if (Object.keys(compactMeta).length === 0) {
+    return baseStr.length > 0 ? baseStr : null;
+  }
+
+  return `${baseStr}${PERSONNEL_META_HASH_PREFIX}${encodeURIComponent(
+    JSON.stringify(compactMeta)
+  )}`;
+}
+
 function resolveDefaultRoomForSupabaseRecord(
   name: string,
   role: string,
-  division: DivisionType
+  division: DivisionType,
+  rawDivision?: string | null
 ): { roomName: VirtualOfficeRoomName; branch: BranchType; supervisor: string } {
   const nameLower = name.trim().toLowerCase();
   const roleLower = role.trim().toLowerCase();
+  const divLower = String(rawDivision || division || '').trim().toLowerCase();
+
+  // Explicit match for Izah / Iza -> Ruangan Production & HRD
+  if (nameLower === 'izah' || nameLower === 'iza') {
+    return {
+      roomName: 'Ruangan Production & HRD',
+      branch: 'JKT',
+      supervisor: 'Hildasari Umami (Founder & CEO)',
+    };
+  }
 
   // Check if name matches any canonical room roster
   for (const roomDef of VIRTUAL_OFFICE_ROOMS) {
@@ -3264,28 +3557,46 @@ function resolveDefaultRoomForSupabaseRecord(
     }
   }
 
-  if (roleLower.includes('operational')) {
+  if (roleLower.includes('operational') || roleLower.includes('operasional')) {
     return {
       roomName: 'Ruangan Operational',
       branch: 'JKT',
       supervisor: 'Hildasari Umami (Founder & CEO)',
     };
   }
-  if (division === 'Executive' || roleLower.includes('ceo') || roleLower.includes('executive')) {
+  if (
+    division === 'Executive' ||
+    divLower === 'executive' ||
+    roleLower.includes('ceo') ||
+    roleLower.includes('executive')
+  ) {
     return {
       roomName: 'Ruangan Executive (Team Bu Hilda)',
       branch: 'JKT',
       supervisor: 'Board of Founders Futari',
     };
   }
-  if (roleLower.includes('finance')) {
+  if (roleLower.includes('finance') || divLower.includes('finance')) {
     return {
       roomName: 'Ruangan Finance',
       branch: 'JKT',
       supervisor: '',
     };
   }
-  if (division === 'PM' || roleLower.includes('project manager')) {
+  if (
+    roleLower.includes('hrd') ||
+    roleLower.includes('production') ||
+    roleLower.includes('recruitment') ||
+    divLower.includes('hrd') ||
+    divLower.includes('production')
+  ) {
+    return {
+      roomName: 'Ruangan Production & HRD',
+      branch: 'JKT',
+      supervisor: '',
+    };
+  }
+  if (division === 'PM' || divLower.includes('project management') || roleLower.includes('project manager')) {
     return {
       roomName: 'Ruangan PM (Team Bu Ade)',
       branch: 'JKT',
@@ -3299,13 +3610,6 @@ function resolveDefaultRoomForSupabaseRecord(
       supervisor: 'Ade Yenny (Project Manager)',
     };
   }
-  if (roleLower.includes('production') || roleLower.includes('recruitment')) {
-    return {
-      roomName: 'Ruangan Production & HRD',
-      branch: 'JKT',
-      supervisor: '',
-    };
-  }
   return {
     roomName: 'Ruangan Creative/Design',
     branch: 'JKT',
@@ -3314,7 +3618,7 @@ function resolveDefaultRoomForSupabaseRecord(
 }
 
 /**
- * Maps a row from the Supabase `personnel` table (`id, created_at, name, email, role, division`)
+ * Maps a row from the Supabase `personnel` table (`id, created_at, name, email, role, division, avatar_url, supervisor_email, status`)
  * into a full `StaffMemberRecord` so existing RBAC routing, attendance, petty cash, SOP, fleet,
  * and 3D Virtual Office modules work seamlessly.
  */
@@ -3333,23 +3637,50 @@ export function mapSupabasePersonnelToStaffRecord(
       ? row.name.trim()
       : fallbackNameFromEmail || 'Personel Futari';
 
-  const cleanRole =
-    row.role && row.role.trim().length > 0
-      ? row.role.trim()
-      : cleanEmail === DEVELOPER_SUPERADMIN_EMAIL
-      ? 'Digital'
-      : 'Unassigned';
+  const isIzahAccount =
+    cleanEmail === 'izah.futari@gmail.com' ||
+    cleanName.toLowerCase() === 'izah';
 
-  const rawDivTrimmed = (row.division || '').trim();
-  const normalizedDivision = normalizeSupabaseDivision(row.division, cleanRole);
+  const cleanRole = isIzahAccount
+    ? row.role && row.role.trim().length > 0
+      ? row.role.trim()
+      : 'HRD'
+    : row.role && row.role.trim().length > 0
+    ? row.role.trim()
+    : cleanEmail === DEVELOPER_SUPERADMIN_EMAIL
+    ? 'Digital'
+    : 'Unassigned';
+
+  const rawDivTrimmed = isIzahAccount
+    ? (row.division || '').trim() || 'HRD'
+    : (row.division || '').trim();
+  const normalizedDivision = normalizeSupabaseDivision(rawDivTrimmed, cleanRole);
   const displayDivision = rawDivTrimmed.length > 0 ? rawDivTrimmed : normalizedDivision;
   const divisionLabel = displayDivision;
 
-  const { roomName, branch, supervisor } = resolveDefaultRoomForSupabaseRecord(
+  const {
+    roomName: defaultRoomName,
+    branch: defaultBranch,
+    supervisor,
+  } = resolveDefaultRoomForSupabaseRecord(
     cleanName,
     cleanRole,
-    normalizedDivision
+    normalizedDivision,
+    rawDivTrimmed
   );
+
+  // Decode clean photo URL and any persisted extended metadata (roomName, branch, password, avatar3DConfig, etc.)
+  const { cleanPhotoUrl, meta } = decodePersonnelAvatarUrlAndMetadata(
+    row.avatar_url
+  );
+
+  const roomName: VirtualOfficeRoomName =
+    meta.roomName ||
+    (isIzahAccount ? 'Ruangan Production & HRD' : defaultRoomName);
+
+  const branch: BranchType =
+    meta.branch ||
+    (roomName === 'Cabang Bandung' ? 'Bandung' : defaultBranch);
 
   const idStr = String(row.id ?? `sup_${seedIndex + 1}`);
   const isDev =
@@ -3367,12 +3698,19 @@ export function mapSupabasePersonnelToStaffRecord(
     ? 'PENDING'
     : 'ACTIVE';
 
+  const savedPassword =
+    meta.password ||
+    (cleanEmail === DEVELOPER_SUPERADMIN_EMAIL
+      ? DEVELOPER_SUPERADMIN_PASSWORD
+      : undefined);
+
   return {
     id: idStr,
     created_at: row.created_at || undefined,
     staffId: idStr,
     name: cleanName,
     email: cleanEmail,
+    password: savedPassword,
     accessLevel: isDev
       ? 'developer'
       : normalizedDivision === 'Executive'
@@ -3387,16 +3725,27 @@ export function mapSupabasePersonnelToStaffRecord(
     location: branch === 'Bandung' ? 'Bandung' : 'JKT',
     supervisor,
     supervisor_email: row.supervisor_email || null,
-    workMode: isSuspended ? 'OFFLINE' : 'OFFLINE',
+    workMode: 'OFFLINE',
     checkInTime: '-',
     lateMinutesMonth: 0,
     deskZone: roomName,
     roomName,
     deskCoords: computeDeskCoordsForRoom(roomName, seedIndex + 1),
-    avatarColor: '#00B4D8',
+    avatarColor: meta.avatarColor || '#00B4D8',
     initials: computeInitialsFromName(cleanName),
-    avatar_url: row.avatar_url || null,
-    photoUrl: row.avatar_url || undefined,
+    avatar_url: cleanPhotoUrl,
+    photoUrl: cleanPhotoUrl || undefined,
+    avatar3DConfig: meta.avatar3DConfig
+      ? {
+          shirtColor: meta.avatar3DConfig.shirtColor || meta.avatarColor || '#00B4D8',
+          hairStyle: meta.avatar3DConfig.hairStyle || 'short',
+          hairColor: meta.avatar3DConfig.hairColor || '#1e293b',
+          useHijab: Boolean(meta.avatar3DConfig.useHijab),
+          hijabColor: meta.avatar3DConfig.hijabColor || '#0277BD',
+        }
+      : undefined,
+    allowedAttendanceViewerIds: meta.allowedAttendanceViewerIds,
+    prevAuthPassword: meta.prevAuthPassword,
   };
 }
 
@@ -3408,7 +3757,7 @@ export function mapSupabasePersonnelListToStaffList(
   staff.forEach((s) => {
     if (s.email) emailMap.set(s.email.toLowerCase(), s);
   });
-  return staff.map((s) => {
+  const withSupervisors = staff.map((s) => {
     if (s.supervisor_email) {
       const sup = emailMap.get(s.supervisor_email.toLowerCase());
       if (sup) {
@@ -3422,10 +3771,8 @@ export function mapSupabasePersonnelListToStaffList(
         supervisor: s.supervisor_email,
       };
     }
-    // If supervisor_email is explicitly null:
-    // Top-level executives default to "Board of Founders Futari", while others without a supervisor have empty supervisor
     const roleLower = (s.role || '').toLowerCase();
-    const divLower = (s.division || '').toLowerCase();
+    const divLower = String(s.division || '').toLowerCase();
     const isExecutive =
       roleLower === 'executive' ||
       roleLower.includes('founder') ||
@@ -3437,6 +3784,8 @@ export function mapSupabasePersonnelListToStaffList(
       supervisor: isExecutive ? 'Board of Founders Futari' : '',
     };
   });
+
+  return assignRoomGridCoordinatesToStaffList(withSupervisors);
 }
 
 export interface SupabaseAttendanceRow {
@@ -3712,7 +4061,7 @@ export function applyActiveAttendanceToStaffList(
     }
   });
 
-  return updatedList;
+  return assignRoomGridCoordinatesToStaffList(updatedList);
 }
 
 // =============================================================================

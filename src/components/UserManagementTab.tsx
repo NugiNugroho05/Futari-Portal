@@ -18,6 +18,7 @@ import {
   Sparkles,
   Users,
   Eye,
+  EyeOff,
   SlidersHorizontal,
 } from 'lucide-react';
 import {
@@ -101,6 +102,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
   const [editHairColor, setEditHairColor] = useState('#0f172a');
   const [editUseHijab, setEditUseHijab] = useState(false);
   const [editHijabColor, setEditHijabColor] = useState('#0277BD');
+  const [showEditPassword, setShowEditPassword] = useState(false);
 
   const [isSavingDetailedEdit, setIsSavingDetailedEdit] = useState(false);
   const [saveDetailedEditError, setSaveDetailedEditError] = useState('');
@@ -197,16 +199,40 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
       })
       .map((s) => s.staffId);
 
+    // Resolve current supervisor option value (`${sup.name} (${sup.role})` or `'Board of Founders Futari'`)
+    const supEmail = (person.supervisor_email || '').trim().toLowerCase();
+    const matchedSup = supEmail
+      ? activePersonnelList.find(
+          (p) =>
+            p.staffId !== person.staffId &&
+            (p.email || '').trim().toLowerCase() === supEmail
+        )
+      : activePersonnelList.find((p) => {
+          if (p.staffId === person.staffId) return false;
+          const formatted = `${p.name} (${p.role})`;
+          const rawSup = (person.supervisor || '').trim().toLowerCase();
+          return (
+            rawSup.length > 0 &&
+            (formatted.toLowerCase() === rawSup ||
+              p.name.toLowerCase() === rawSup ||
+              rawSup.startsWith(`${p.name.toLowerCase()} (`))
+          );
+        });
+    const resolvedSupValue = matchedSup
+      ? `${matchedSup.name} (${matchedSup.role})`
+      : 'Board of Founders Futari';
+
     setEditingStaff(person);
     setSaveDetailedEditError('');
     setIsSavingDetailedEdit(false);
+    setShowEditPassword(false);
     setEditName(person.name);
     setEditEmail(person.email);
-    setEditPassword(person.password || 'futari2026');
+    setEditPassword(person.password || '');
     setEditRole(person.role);
     setEditDivision(person.division);
     setEditBranch(person.branch);
-    setEditSupervisor(person.supervisor || 'Board of Founders Futari');
+    setEditSupervisor(resolvedSupValue);
     setEditRoomName(person.roomName);
     setEditWorkMode(person.workMode);
     setEditTeamMemberIds(currentDirectReports);
@@ -235,17 +261,27 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
     if (!editingStaff || isSavingDetailedEdit) return;
 
     setSaveDetailedEditError('');
+    const cleanNewPass = editPassword.trim();
+    if (cleanNewPass && cleanNewPass.length < 6) {
+      setSaveDetailedEditError(
+        'Password akun minimal harus 6 karakter sesuai standar keamanan Supabase.'
+      );
+      return;
+    }
+
     setIsSavingDetailedEdit(true);
 
     try {
+      const effectiveBranch: BranchType =
+        editRoomName === 'Cabang Bandung' ? 'Bandung' : editBranch;
       if (onSuperadminEditFullProfile) {
         await onSuperadminEditFullProfile(editingStaff.staffId, {
           name: editName.trim() || editingStaff.name,
           email: editEmail.trim() || editingStaff.email,
-          password: editPassword.trim() || editingStaff.password,
+          password: cleanNewPass || editingStaff.password,
           role: editRole,
           division: editDivision,
-          branch: editBranch,
+          branch: effectiveBranch,
           supervisor: editSupervisor,
           roomName: editRoomName,
           workMode: editWorkMode,
@@ -268,7 +304,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
       triggerToast(
         `Pengaturan "${
           editName.trim() || editingStaff.name
-        }" (Role: ${editRole}, Divisi: ${editDivision}) berhasil disimpan ke Supabase.`,
+        }" (Role: ${editRole}, Divisi: ${editDivision}, Ruangan: ${editRoomName}) berhasil disimpan ke Supabase.`,
         'success'
       );
       // Close modal ONLY after successful save
@@ -1080,20 +1116,37 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
                     >
                       Password Akun
                     </label>
-                    <input
-                      id="superadmin-edit-password"
-                      data-testid="superadmin-edit-password"
-                      type="text"
-                      value={editPassword}
-                      onChange={(e) => setEditPassword(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-slate-950 border border-slate-700 text-white"
-                    />
+                    <div className="relative flex items-center">
+                      <input
+                        id="superadmin-edit-password"
+                        data-testid="superadmin-edit-password"
+                        type={showEditPassword ? 'text' : 'password'}
+                        value={editPassword}
+                        onChange={(e) => setEditPassword(e.target.value)}
+                        placeholder="Masukkan password akun..."
+                        className="w-full px-3 py-2 pr-9 rounded-lg text-xs font-mono bg-slate-950 border border-slate-700 text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowEditPassword((prev) => !prev)}
+                        title={showEditPassword ? 'Sembunyikan Password' : 'Lihat Password'}
+                        aria-label="Toggle Password Visibility"
+                        className="absolute right-2.5 p-1 rounded text-slate-400 hover:text-white transition-colors"
+                      >
+                        {showEditPassword ? (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs font-semibold mb-1">
                       Ruangan Virtual Office
                     </label>
                     <select
+                      data-testid="superadmin-edit-room"
                       value={editRoomName}
                       onChange={(e) =>
                         setEditRoomName(e.target.value as VirtualOfficeRoomName)

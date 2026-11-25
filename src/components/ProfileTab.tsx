@@ -36,16 +36,22 @@ import {
   SelfServiceProfileUpdateInput,
   getDirectReportsForSupervisor,
   getStaffAvatar3DConfig,
+  encodePersonnelAvatarUrlWithMetadata,
+  canViewAllAttendance,
 } from '../utils/futariLogic';
 
 interface ProfileTabProps {
   currentUser: StaffMemberRecord;
   staffList?: StaffMemberRecord[];
   onSelectStaffRole?: (staff: StaffMemberRecord) => void;
-  onUpdateOwnProfile?: (updates: SelfServiceProfileUpdateInput) => void;
+  onUpdateOwnProfile?: (
+    updates: SelfServiceProfileUpdateInput
+  ) => Promise<void> | void;
   userAttendanceLogs: AttendanceRecord[];
   payrollCycleLabel: string;
   onOpenStructuredPdfModal: () => void;
+  selectedAttendanceTargetId?: string;
+  onSelectAttendanceTargetId?: (staffId: string) => void;
   isDark: boolean;
 }
 
@@ -77,6 +83,8 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   userAttendanceLogs,
   payrollCycleLabel,
   onOpenStructuredPdfModal,
+  selectedAttendanceTargetId,
+  onSelectAttendanceTargetId,
   isDark,
 }) => {
   const current3D = useMemo(
@@ -84,10 +92,15 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
     [currentUser]
   );
 
-  // Self-Service Profile Form State
+  const hasGlobalAttendanceView = useMemo(
+    () => canViewAllAttendance(currentUser),
+    [currentUser]
+  );
+
+  // Self-Service Profile Form State (never hardcodes 'futari2026')
   const [editName, setEditName] = useState<string>(currentUser.name);
   const [editPassword, setEditPassword] = useState<string>(
-    currentUser.password || 'futari2026'
+    currentUser.password || ''
   );
   const [editSupervisor, setEditSupervisor] = useState<string>(
     currentUser.supervisor
@@ -113,6 +126,8 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
     current3D.hijabColor || currentUser.avatarColor
   );
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
+  const [saveProfileError, setSaveProfileError] = useState<string | null>(null);
+  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
 
   // Password visibility toggle state
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -132,11 +147,26 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
       const userEmail = (currentUser.email || '').trim().toLowerCase();
       if (!userEmail) throw new Error('Email akun tidak ditemukan pada sesi aktif.');
 
-      // 1. Update Supabase personnel table setting avatar_url to null
+      const encodedNullWithMeta = encodePersonnelAvatarUrlWithMetadata(null, {
+        roomName: editRoomName || currentUser.roomName,
+        branch: currentUser.branch,
+        password: editPassword.trim() || currentUser.password,
+        avatarColor: editAvatarColor || currentUser.avatarColor,
+        avatar3DConfig: {
+          shirtColor,
+          hairStyle,
+          hairColor,
+          useHijab,
+          hijabColor,
+        },
+        allowedAttendanceViewerIds: currentUser.allowedAttendanceViewerIds,
+      });
+
+      // 1. Update Supabase personnel table clearing photo while preserving metadata
       const { error: dbError } = await supabase
         .from('personnel')
-        .update({ avatar_url: null })
-        .eq('email', userEmail);
+        .update({ avatar_url: encodedNullWithMeta })
+        .ilike('email', userEmail);
 
       if (dbError) {
         console.warn('Personnel table remove avatar warning:', dbError.message);
@@ -144,7 +174,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
 
       // 2. Update local state
       if (onUpdateOwnProfile) {
-        onUpdateOwnProfile({
+        await onUpdateOwnProfile({
           avatar_url: null,
           photoUrl: undefined,
         });
@@ -196,11 +226,29 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
         throw new Error('Gagal mendapatkan public URL avatar.');
       }
 
-      // 3. Update personnel table avatar_url
+      const encodedAvatarWithMeta = encodePersonnelAvatarUrlWithMetadata(
+        avatarUrl,
+        {
+          roomName: editRoomName || currentUser.roomName,
+          branch: currentUser.branch,
+          password: editPassword.trim() || currentUser.password,
+          avatarColor: editAvatarColor || currentUser.avatarColor,
+          avatar3DConfig: {
+            shirtColor,
+            hairStyle,
+            hairColor,
+            useHijab,
+            hijabColor,
+          },
+          allowedAttendanceViewerIds: currentUser.allowedAttendanceViewerIds,
+        }
+      );
+
+      // 3. Update personnel table avatar_url while preserving profile metadata
       const { error: dbError } = await supabase
         .from('personnel')
-        .update({ avatar_url: avatarUrl })
-        .eq('email', userEmail);
+        .update({ avatar_url: encodedAvatarWithMeta })
+        .ilike('email', userEmail);
 
       if (dbError) {
         console.warn('Personnel table update warning:', dbError.message);
@@ -208,7 +256,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
 
       // 4. Update in-app state
       if (onUpdateOwnProfile) {
-        onUpdateOwnProfile({
+        await onUpdateOwnProfile({
           avatar_url: avatarUrl,
           photoUrl: avatarUrl,
         });
@@ -222,9 +270,6 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
       if (e.target) e.target.value = '';
     }
   };
-
-  // Supabase Auth Change Password State (`supabase.auth.updateUser({ password: newPassword })`)
-  // (Form removed in favor of single password input in Update Profile)
 
   // Dynamically fetched personnel from Supabase `personnel` table for Direct Supervisor options
   const [personnelList, setPersonnelList] = useState<
@@ -269,7 +314,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             }
           } else {
             const roleLower = (currentUser.role || '').toLowerCase();
-            const divLower = (currentUser.division || '').toLowerCase();
+            const divLower = String(currentUser.division || '').toLowerCase();
             const isExecutive =
               roleLower === 'executive' ||
               roleLower.includes('founder') ||
@@ -293,11 +338,11 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
     };
   }, [currentUser.email, currentUser.supervisor_email]);
 
-  // Sync local form state whenever currentUser or personnelList changes
+  // Sync local form state whenever currentUser or personnelList changes (never hardcodes 'futari2026')
   useEffect(() => {
     const cfg = getStaffAvatar3DConfig(currentUser);
     setEditName(currentUser.name);
-    setEditPassword(currentUser.password || 'futari2026');
+    setEditPassword(currentUser.password || '');
 
     // Resolve supervisor by supervisor_email first, fallback to currentUser.supervisor
     const activeSupervisorEmail = (currentUser.supervisor_email || '').trim().toLowerCase();
@@ -345,7 +390,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
       ? 'Jakarta (Jl. Nusa Indah No.33, RT.14/RW.5, Cipete Sel., Kec. Cilandak, Kota Jakarta Selatan, Daerah Khusus Ibukota Jakarta 12410)'
       : 'Bandung (BDG — Braga Creative Hub)';
 
-  // Filter mock database for personnel who have the currently active user set as their supervisor
+  // Filter personnel who have the currently active user set as their supervisor
   const directReports = useMemo(
     () => getDirectReportsForSupervisor(staffList, currentUser),
     [staffList, currentUser]
@@ -370,57 +415,85 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
 
   const handleSaveSelfServiceProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!onUpdateOwnProfile) return;
+    if (!onUpdateOwnProfile || isSavingProfile) return;
+
+    setSaveFeedback(null);
+    setSaveProfileError(null);
+
+    const cleanPassword = editPassword.trim();
+    if (cleanPassword && cleanPassword.length < 6) {
+      setSaveProfileError(
+        'Password akun minimal harus 6 karakter sesuai standar keamanan Supabase Authentication.'
+      );
+      return;
+    }
 
     // Resolve chosen supervisor email
     const chosenSupEmail = editSupervisor.trim();
-    const matchedSup = supervisorCandidates.find(
-      (c) =>
-        c.email.toLowerCase() === chosenSupEmail.toLowerCase() ||
-        c.name.toLowerCase() === chosenSupEmail.toLowerCase()
-    );
+    const isTopExecutiveSup =
+      !chosenSupEmail ||
+      chosenSupEmail.toLowerCase().includes('board of founders') ||
+      chosenSupEmail.toLowerCase().includes('top executive');
 
-    const resolvedSupervisorEmail = matchedSup
+    const matchedSup = isTopExecutiveSup
+      ? undefined
+      : supervisorCandidates.find(
+          (c) =>
+            c.email.toLowerCase() === chosenSupEmail.toLowerCase() ||
+            c.name.toLowerCase() === chosenSupEmail.toLowerCase() ||
+            `${c.name} (${c.role})`.toLowerCase() ===
+              chosenSupEmail.toLowerCase()
+        );
+
+    const resolvedSupervisorEmail = isTopExecutiveSup
+      ? null
+      : matchedSup
       ? matchedSup.email.toLowerCase()
       : chosenSupEmail.includes('@')
       ? chosenSupEmail.toLowerCase()
       : null;
 
-    const resolvedSupervisorName = matchedSup
-      ? matchedSup.name
+    const resolvedSupervisorDisplay = isTopExecutiveSup
+      ? 'Board of Founders Futari (Top Executive)'
+      : matchedSup
+      ? `${matchedSup.name} (${matchedSup.role})`
       : chosenSupEmail;
 
-    onUpdateOwnProfile({
-      name: editName.trim() || currentUser.name,
-      password: editPassword.trim() || currentUser.password,
-      supervisor: resolvedSupervisorName || currentUser.supervisor,
-      supervisor_email: resolvedSupervisorEmail,
-      roomName: editRoomName,
-      avatarColor: editAvatarColor,
-      photoUrl: editPhotoUrl.trim() || undefined,
-      avatar3DConfig: {
-        shirtColor,
-        hairStyle,
-        hairColor,
-        useHijab,
-        hijabColor,
-      },
-    });
+    setIsSavingProfile(true);
+    try {
+      await onUpdateOwnProfile({
+        name: editName.trim() || currentUser.name,
+        password: cleanPassword || currentUser.password,
+        supervisor: resolvedSupervisorDisplay || currentUser.supervisor,
+        supervisor_email: resolvedSupervisorEmail,
+        roomName: editRoomName,
+        avatarColor: editAvatarColor,
+        photoUrl: editPhotoUrl.trim() || undefined,
+        avatar3DConfig: {
+          shirtColor,
+          hairStyle,
+          hairColor,
+          useHijab,
+          hijabColor,
+        },
+      });
 
-    // Also update password directly if modified
-    if (editPassword && editPassword.trim() && editPassword.trim().length >= 6) {
-      try {
-        await supabase.auth.updateUser({ password: editPassword.trim() });
-      } catch (authErr) {
-        console.warn('Could not update password via Supabase Auth:', authErr);
-      }
+      setResolvedSupervisorName(
+        resolvedSupervisorDisplay || currentUser.supervisor
+      );
+      setSaveFeedback(
+        `Profil & 3D Avatar (${
+          editName.trim() || currentUser.name
+        } · Ruangan: ${editRoomName}) berhasil disimpan ke database Supabase dan langsung disinkronkan ke 3D Virtual Office!`
+      );
+    } catch (err: any) {
+      setSaveProfileError(
+        err?.message ||
+          'Gagal menyimpan perubahan profil ke Supabase. Silakan coba lagi.'
+      );
+    } finally {
+      setIsSavingProfile(false);
     }
-
-    setSaveFeedback(
-      `Profil & 3D Avatar (${
-        editName.trim() || currentUser.name
-      }) berhasil disimpan dan langsung disinkronkan ke 3D Virtual Office!`
-    );
   };
 
   return (
@@ -438,15 +511,70 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
           </h1>
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenStructuredPdfModal}
-          className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-2 whitespace-nowrap shadow-md cursor-pointer"
-        >
-          <FileDown className="w-4 h-4" />
-          <span>Lihat &amp; Unduh Laporan Absensi (PDF)</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {hasGlobalAttendanceView && onSelectAttendanceTargetId && (
+            <div className="flex items-center gap-2">
+              <label
+                htmlFor="profile-global-attendance-select"
+                className="text-xs font-semibold text-[#00B4D8] whitespace-nowrap"
+              >
+                Rekap Absensi Karyawan:
+              </label>
+              <select
+                id="profile-global-attendance-select"
+                data-testid="profile-global-attendance-select"
+                value={selectedAttendanceTargetId || currentUser.staffId}
+                onChange={(e) => onSelectAttendanceTargetId(e.target.value)}
+                className={`px-3 py-2 rounded-xl text-xs font-semibold border ${
+                  isDark
+                    ? 'bg-slate-900 border-slate-700 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              >
+                {staffList.map((s) => (
+                  <option key={s.staffId} value={s.staffId}>
+                    {s.name} ({s.role} · {s.division})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenStructuredPdfModal}
+            className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-2 whitespace-nowrap shadow-md cursor-pointer"
+          >
+            <FileDown className="w-4 h-4" />
+            <span>Lihat &amp; Unduh Laporan Absensi (PDF)</span>
+          </button>
+        </div>
       </div>
+
+      {/* Save Error Banner */}
+      <AnimatePresence>
+        {saveProfileError && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            data-testid="profile-save-error"
+            className="p-4 rounded-xl border border-rose-500/50 bg-rose-500/15 text-rose-300 text-xs flex items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span className="font-semibold">{saveProfileError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSaveProfileError(null)}
+              className="text-rose-300 hover:text-white font-mono text-[11px] font-bold"
+            >
+              [TUTUP]
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Save Feedback Toast */}
       <AnimatePresence>
@@ -734,10 +862,20 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             <button
               type="submit"
               data-testid="save-self-service-profile-btn"
-              className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-2 shadow-md cursor-pointer self-start sm:self-auto"
+              disabled={isSavingProfile}
+              className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 disabled:opacity-60 flex items-center gap-2 shadow-md cursor-pointer self-start sm:self-auto"
             >
-              <Save className="w-4 h-4" />
-              <span>Save Profile</span>
+              {isSavingProfile ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Menyimpan ke Supabase...</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4" />
+                  <span>Save Profile</span>
+                </>
+              )}
             </button>
           </div>
 
@@ -781,6 +919,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                       type={showPassword ? 'text' : 'password'}
                       value={editPassword}
                       onChange={(e) => setEditPassword(e.target.value)}
+                      placeholder="Masukkan password baru (min. 6 karakter)"
                       className={`w-full px-3 py-2 pr-9 rounded-lg text-xs border ${
                         isDark
                           ? 'bg-slate-900 border-slate-700 text-white'

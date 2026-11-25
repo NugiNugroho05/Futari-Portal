@@ -19,6 +19,8 @@ import {
   SupabaseAttendanceRow,
   isAttendanceRowActiveForToday,
   applyActiveAttendanceToStaffList,
+  assignRoomGridCoordinatesToStaffList,
+  computeRoomGridDeskCoords,
 } from '../utils/futariLogic';
 import { supabase } from '../supabaseClient';
 import {
@@ -544,7 +546,7 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       staff,
       activeAttendanceByEmail
     );
-    return mergedFromSupabase.map((member) => {
+    const mergedWithLocal = mergedFromSupabase.map((member) => {
       if (member.workMode === 'WFO') {
         return member;
       }
@@ -559,6 +561,7 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       }
       return member;
     });
+    return assignRoomGridCoordinatesToStaffList(mergedWithLocal);
   }, [staff, activeAttendanceByEmail]);
 
   const activeWfoStaff = useMemo(
@@ -1005,6 +1008,8 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
     interface AvatarEntry {
       staffId: string;
       staffName: string;
+      roomName: string;
+      appearanceSignature: string;
       isBandung: boolean;
       deskRootGroup: THREE.Group;
       avatarActorGroup: THREE.Group;
@@ -1277,9 +1282,13 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       nameSprite.userData = { staffId: person.staffId };
       avatarActorGroup.add(nameSprite);
 
+      const appearanceSignature = `${person.name}|${person.role}|${person.roomName}|${cfg3D.shirtColor}|${cfg3D.hairStyle}|${cfg3D.hairColor}|${cfg3D.useHijab}|${cfg3D.hijabColor}`;
+
       avatarEntriesMap.set(person.staffId, {
         staffId: person.staffId,
         staffName: person.name,
+        roomName: person.roomName,
+        appearanceSignature,
         isBandung: inBandung,
         deskRootGroup,
         avatarActorGroup,
@@ -1307,7 +1316,7 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
     };
 
     const syncAvatarsInScene = (
-      nextStaffList: StaffMemberRecord[],
+      rawStaffList: StaffMemberRecord[],
       opts?: {
         newlyAddedId?: string | null;
         walkInId?: string | null;
@@ -1315,6 +1324,32 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
         realtimeSpawnId?: string | null;
       }
     ) => {
+      // Group active avatars by their room/zone and compute non-overlapping 2D Grid coordinates
+      const byRoom = new Map<string, StaffMemberRecord[]>();
+      rawStaffList.forEach((p) => {
+        const rm = p.roomName || 'Ruangan Creative/Design';
+        const list = byRoom.get(rm) || [];
+        list.push(p);
+        byRoom.set(rm, list);
+      });
+
+      const nextStaffList: StaffMemberRecord[] = rawStaffList.map((p) => {
+        const rm = p.roomName || 'Ruangan Creative/Design';
+        const roomGroup = byRoom.get(rm) || [p];
+        const idxInRoom = Math.max(
+          0,
+          roomGroup.findIndex((m) => m.staffId === p.staffId)
+        );
+        return {
+          ...p,
+          deskCoords: computeRoomGridDeskCoords(
+            p.roomName,
+            idxInRoom,
+            roomGroup.length
+          ),
+        };
+      });
+
       const nextIds = new Set(nextStaffList.map((p) => p.staffId));
 
       // 1. Remove & dispose any avatars that clocked out / are no longer active
@@ -1324,10 +1359,39 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
         }
       });
 
-      // 2. Spawn any newly checked-in avatars
+      // 2. Spawn newly checked-in avatars or update grid positions / appearance of existing avatars
       nextStaffList.forEach((person) => {
-        if (!avatarEntriesMap.has(person.staffId)) {
+        const existing = avatarEntriesMap.get(person.staffId);
+        const cfg3D = getStaffAvatar3DConfig(person);
+        const nextSig = `${person.name}|${person.role}|${person.roomName}|${cfg3D.shirtColor}|${cfg3D.hairStyle}|${cfg3D.hairColor}|${cfg3D.useHijab}|${cfg3D.hijabColor}`;
+
+        if (!existing) {
           createAndSpawnAvatarEntry(person, opts);
+          return;
+        }
+
+        if (existing.appearanceSignature !== nextSig) {
+          removeAndDisposeAvatarEntry(person.staffId);
+          createAndSpawnAvatarEntry(person, opts);
+          return;
+        }
+
+        // Update grid coordinates if room occupancy changed so avatars never overlap
+        const nextX = person.deskCoords.x;
+        const nextZ = person.deskCoords.z;
+        const nextHomeX = nextX;
+        const nextHomeZ = nextZ + 0.28;
+
+        if (
+          Math.abs(existing.homeX - nextHomeX) > 0.01 ||
+          Math.abs(existing.homeZ - nextHomeZ) > 0.01
+        ) {
+          existing.homeX = nextHomeX;
+          existing.homeZ = nextHomeZ;
+          existing.deskRootGroup.position.set(nextX, 0, nextZ);
+          if (existing.walkMode === 'idle') {
+            existing.avatarActorGroup.position.set(nextHomeX, 0, nextHomeZ);
+          }
         }
       });
 

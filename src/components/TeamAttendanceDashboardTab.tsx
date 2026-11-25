@@ -29,6 +29,7 @@ import {
   getGlassSurfaceClasses,
   COMPANY_DIVISIONS,
   syncAttendanceLogsWithLeave,
+  toJakartaDateKey,
 } from '../utils/futariLogic';
 
 interface TeamAttendanceDashboardTabProps {
@@ -105,6 +106,8 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
     });
   }, [visibleTeamMembers, selectedDivision, modeFilter, searchQuery]);
 
+  const todayIsoKey = useMemo(() => toJakartaDateKey(new Date()), []);
+
   // Dynamically computed attendance logs (Regular Hours vs Overtime >= 20:00) strictly scoped to currently visible filtered rows on screen
   const exportableLogs = useMemo(
     () =>
@@ -113,10 +116,10 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
         attendanceLogs,
         staffList,
         'ALL_VISIBLE',
-        '2026-10-20',
+        todayIsoKey,
         filteredMembers
       ),
-    [currentUser, attendanceLogs, staffList, filteredMembers]
+    [currentUser, attendanceLogs, staffList, filteredMembers, todayIsoKey]
   );
 
   const exportTotals = useMemo(
@@ -136,15 +139,19 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
   // Specific attendance logs for the member opened in detail overlay
   const detailMemberLogs = useMemo(() => {
     if (!selectedDetailMember) return [];
+    const targetEmailLower = (selectedDetailMember.email || '').trim().toLowerCase();
     const directLogs = attendanceLogs.filter(
-      (l) => l.staffId === selectedDetailMember.staffId
+      (l) =>
+        l.staffId === selectedDetailMember.staffId ||
+        (Boolean(targetEmailLower) &&
+          (l.email || '').trim().toLowerCase() === targetEmailLower)
     );
     const memberExportLogs = buildTeamDashboardExportLogs(
       currentUser,
       directLogs,
       staffList,
       selectedDetailMember.staffId,
-      '2026-10-20',
+      todayIsoKey,
       [selectedDetailMember]
     );
     return syncAttendanceLogsWithLeave(
@@ -153,7 +160,7 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
       selectedDetailMember,
       calendarEvents
     );
-  }, [selectedDetailMember, attendanceLogs, currentUser, staffList, leaveRecords, calendarEvents]);
+  }, [selectedDetailMember, attendanceLogs, currentUser, staffList, leaveRecords, calendarEvents, todayIsoKey]);
 
   const detailMemberTotals = useMemo(
     () => calculateAttendanceExportTotals(detailMemberLogs),
