@@ -154,6 +154,8 @@ import {
   isAttendanceRowActiveForToday,
   applyActiveAttendanceToStaffList,
   formatRealTimeHHMM,
+  formatBranchDisplay,
+  formatRoomDisplayName,
   syncAttendanceLogsWithLeave,
 } from './utils/futariLogic';
 import { supabase } from './supabaseClient';
@@ -3829,7 +3831,7 @@ export default function App() {
     model: string;
     licensePlate: string;
     status: FleetVehicleStatus;
-    branch?: 'JKT' | 'Bandung';
+    branch?: 'JKT' | 'Bandung' | 'Jawa';
     notes?: string;
   }) => {
     // 1. Optimistic local update
@@ -3870,7 +3872,7 @@ export default function App() {
       model?: string;
       licensePlate?: string;
       status?: FleetVehicleStatus;
-      branch?: 'JKT' | 'Bandung';
+      branch?: 'JKT' | 'Bandung' | 'Jawa';
       notes?: string;
     }
   ) => {
@@ -4406,7 +4408,7 @@ export default function App() {
                 FUTARI PORTAL
               </p>
               <p className="text-[10px] text-[#00B4D8] font-mono">
-                JKT HQ &amp; BDG HUB
+                JKT HQ &amp; JAWA HUB
               </p>
             </div>
           </div>
@@ -4441,7 +4443,7 @@ export default function App() {
               {currentUser.name}
             </p>
             <p className={`text-[11px] truncate ${mutedText}`}>
-              {currentUser.role} ({currentUser.branch})
+              {currentUser.role} ({formatBranchDisplay(currentUser.branch)})
             </p>
           </div>
         </div>
@@ -4844,7 +4846,7 @@ export default function App() {
                     <div className="min-w-0 flex-1">
                       <p className="font-bold text-xs truncate">{currentUser.name}</p>
                       <p className="text-[11px] text-[#00B4D8] font-medium truncate">
-                        {currentUser.role} ({currentUser.branch})
+                        {currentUser.role} ({formatBranchDisplay(currentUser.branch)})
                       </p>
                     </div>
                   </div>
@@ -5084,58 +5086,56 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 4-Column KPI Summary Strip */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className={`p-5 rounded-xl border ${surfaceCard}`}>
-                  <p className={`text-xs ${mutedText}`}>
-                    Active WFO (Virtual Office)
+              {/* 4-Column KPI Summary Strip (Consistent & Concise Typography) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch">
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                    Active WFO
                   </p>
-                  <p className="text-2xl font-bold font-mono tabular-nums mt-1 text-[#00B4D8]">
+                  <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-[#00B4D8]">
                     {wfoStaffList.length} / {staffList.length}
                   </p>
-                  <p className={`text-[11px] mt-1 ${mutedText}`}>
-                    Jakarta HQ &amp; Bandung Creative Hub
+                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
+                    Jakarta HQ &amp; Jawa
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border ${surfaceCard}`}>
-                  <p className={`text-xs ${mutedText}`}>
-                    Siklus Payroll Aktif (26–25)
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                    Siklus Payroll
                   </p>
-                  <p className="text-base font-bold font-mono tabular-nums mt-2">
+                  <p className="text-base sm:text-lg font-bold font-mono tabular-nums mt-1.5">
                     {payrollCycle.label}
                   </p>
-                  <p className={`text-[11px] mt-1 ${mutedText}`}>
-                    Jam Masuk 10:00 · Toleransi 10:05
+                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
+                    Masuk 10:00 · Toleransi 10:05 WIB
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border ${surfaceCard}`}>
-                  <p className={`text-xs ${mutedText}`}>
-                    Total Accumulated Late Minutes
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                    Total Keterlambatan
                   </p>
-                  <p className="text-2xl font-bold font-mono tabular-nums mt-1 text-amber-500">
+                  <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-amber-500">
                     {isExecutiveUser
                       ? companyTotalLateMinutes
                       : userMonthlyLateMinutes}{' '}
-                    Min
+                    Menit
                   </p>
-                  <p className={`text-[11px] mt-1 ${mutedText}`}>
-                    {isExecutiveUser
-                      ? `Akumulasi ${staffList.length} Personel Bulan Ini`
-                      : `Rekap Privasi ${currentUser.name} Bulan Ini`}
+                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
+                    Rekap Bulan Ini
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border ${surfaceCard}`}>
-                  <p className={`text-xs ${mutedText}`}>
-                    Saldo Petty Cash ({activeEventBudget.eventName.slice(0, 18)}…)
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                    Saldo Petty Cash
                   </p>
-                  <p className="text-xl font-bold font-mono tabular-nums mt-1 text-emerald-500">
+                  <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-emerald-500">
                     {formatIDR(pettyCashSummary.remainingBalance)}
                   </p>
-                  <p className={`text-[11px] mt-1 ${mutedText}`}>
-                    Dari Dana Approval {formatIDR(activeEventBudget.approvedBudget)}
+                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
+                    Dana Approval: {formatIDR(activeEventBudget.approvedBudget)}
                   </p>
                 </div>
               </div>
@@ -5208,7 +5208,7 @@ export default function App() {
                                 style={{ backgroundColor: room.accentColor }}
                               />
                               <h3 className="text-sm font-bold font-display leading-snug">
-                                {room.roomName}
+                                {formatRoomDisplayName(room.roomName)}
                               </h3>
                             </div>
                             <p className={`text-[11px] mt-0.5 ${mutedText}`}>
@@ -5262,7 +5262,7 @@ export default function App() {
                                       {member.name}
                                     </p>
                                     <p className={`text-[11px] leading-tight mt-0.5 ${mutedText}`}>
-                                      {member.role} · {member.branch}
+                                      {member.role} · {formatBranchDisplay(member.branch)}
                                     </p>
                                   </div>
                                 </div>
@@ -5329,7 +5329,7 @@ export default function App() {
                       >
                         {staffList.map((s) => (
                           <option key={s.staffId} value={s.staffId}>
-                            {s.name} ({s.role} · Divisi {s.division} - {s.branch})
+                            {s.name} ({s.role} · Divisi {s.division} - {formatBranchDisplay(s.branch)})
                           </option>
                         ))}
                       </select>
@@ -5378,66 +5378,64 @@ export default function App() {
               </div>
 
               {/* =================================================================
-                  MBA ERLITA FINANCE EXPORT TOTALS STRIP:
-                  1. Total Jam Kerja (Regular Working Hours)
-                  2. Total Jam Lembur (Overtime Hours - strictly >= 20:00)
+                  4-COLUMN ATTENDANCE SUMMARY STRIP (Consistent & Concise Typography)
                  ================================================================= */}
               <div
                 data-testid="finance-attendance-totals-strip"
-                className="no-print grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"
+                className="no-print grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch"
               >
-                <div className={`p-4 md:p-6 rounded-xl border min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs break-words ${mutedText}`}>
-                    1. Total Jam Kerja (Regular Working Hours)
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                    Total Jam Kerja
                   </p>
                   <p
                     data-testid="recap-total-regular-hours"
-                    className="text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 text-[#00B4D8]"
+                    className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-[#00B4D8]"
                   >
                     {attendanceExportTotals.totalRegularHours} Jam
                   </p>
-                  <p className={`text-[11px] mt-1 break-words ${mutedText}`}>
-                    Akumulasi jam kerja reguler ({targetAttendanceEmployee.name})
+                  <p className={`text-[11px] mt-1.5 break-words ${mutedText}`}>
+                    Akumulasi Reguler · {targetAttendanceEmployee.name}
                   </p>
                 </div>
 
-                <div className={`p-4 md:p-6 rounded-xl border min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs break-words ${mutedText}`}>
-                    2. Total Jam Lembur (Overtime Hours ≥ 20:00)
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                    Total Jam Lembur
                   </p>
                   <p
                     data-testid="recap-total-overtime-hours"
-                    className="text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 text-emerald-500"
+                    className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-emerald-500"
                   >
                     {attendanceExportTotals.totalOvertimeHours} Jam
                   </p>
-                  <p className={`text-[11px] mt-1 break-words ${mutedText}`}>
-                    Kompensasi: {formatIDR(attendanceExportTotals.totalOvertimePay)} (IDR 7.000/jam)
+                  <p className={`text-[11px] mt-1.5 break-words ${mutedText}`}>
+                    Kompensasi: {formatIDR(attendanceExportTotals.totalOvertimePay)}
                   </p>
                 </div>
 
-                <div className={`p-4 md:p-6 rounded-xl border min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs break-words ${mutedText}`}>
-                    Akumulasi Keterlambatan ({targetAttendanceEmployee.name})
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                    Total Keterlambatan
                   </p>
                   <p
                     data-testid="accumulated-late-minutes"
-                    className="text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 text-amber-500"
+                    className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-amber-500"
                   >
                     {userMonthlyLateMinutes} Menit
                   </p>
-                  <p className={`text-[11px] mt-1 break-words ${mutedText}`}>
-                    Standar Masuk 10:00 WIB · Toleransi 10:05 WIB
+                  <p className={`text-[11px] mt-1.5 break-words ${mutedText}`}>
+                    Masuk 10:00 · Toleransi 10:05 WIB
                   </p>
                 </div>
 
-                <div className={`p-4 md:p-6 rounded-xl border min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs break-words ${mutedText}`}>
+                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
                     Lokasi Terverifikasi
                   </p>
                   <p
                     data-testid="verified-hq-location-text"
-                    className="text-base font-bold font-display mt-1 text-[#00B4D8] break-words whitespace-normal"
+                    className="text-lg sm:text-xl font-bold font-display mt-1.5 text-[#00B4D8] break-words whitespace-normal"
                   >
                     {activeCurrentUserCheckIn?.mode === 'WFO'
                       ? 'WFO - HQ'
@@ -5447,7 +5445,7 @@ export default function App() {
                       ? 'WFO - HQ'
                       : 'WFE - Event Venue'}
                   </p>
-                  <p className="text-[11px] font-mono text-emerald-400 mt-1">
+                  <p className="text-[11px] font-mono text-emerald-400 mt-1.5">
                     {attendanceExportTotals.totalHybridDays} Hari Transisi Hybrid (WFO↔WFE)
                   </p>
                 </div>
@@ -5846,18 +5844,20 @@ export default function App() {
                   activeCurrentUserCheckIn?.photoDataUrl ||
                   todayCompletedUserAttendance?.photoDataUrl ? (
                     <div className="mt-4 space-y-3">
-                      <img
-                        src={
-                          capturedPhotoUrl ||
-                          activeCurrentUserCheckIn?.photoDataUrl ||
-                          todayCompletedUserAttendance?.photoDataUrl ||
-                          ''
-                        }
-                        alt="Watermarked Attendance Check-In"
-                        data-testid="checkin-inline-preview-img"
-                        referrerPolicy="no-referrer"
-                        className="w-full h-52 object-cover rounded-xl border border-slate-700"
-                      />
+                      <div className="w-full rounded-xl border border-slate-700 bg-slate-950/90 flex items-center justify-center overflow-hidden p-1.5">
+                        <img
+                          src={
+                            capturedPhotoUrl ||
+                            activeCurrentUserCheckIn?.photoDataUrl ||
+                            todayCompletedUserAttendance?.photoDataUrl ||
+                            ''
+                          }
+                          alt="Watermarked Attendance Check-In"
+                          data-testid="checkin-inline-preview-img"
+                          referrerPolicy="no-referrer"
+                          className="w-full max-h-80 object-contain rounded-lg block mx-auto"
+                        />
+                      </div>
                       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="font-mono text-[#00B4D8]">
                           Mode:{' '}

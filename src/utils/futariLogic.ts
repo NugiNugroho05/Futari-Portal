@@ -12,8 +12,29 @@ export type DivisionType =
   | 'HRD'
   | string;
 
-export type BranchType = 'JKT' | 'Bandung';
+export type BranchType = 'JKT' | 'Bandung' | 'Jawa';
 export type WorkModeType = 'WFO' | 'WFE' | 'OFFLINE';
+
+export function formatBranchDisplay(branch?: string | null): string {
+  if (!branch) return 'JKT';
+  const b = branch.trim().toLowerCase();
+  if (
+    b === 'bandung' ||
+    b === 'bdg' ||
+    b === 'jawa' ||
+    b.includes('bandung') ||
+    b.includes('jawa')
+  ) {
+    return 'JAWA';
+  }
+  return 'JKT';
+}
+
+export function formatRoomDisplayName(roomName?: string | null): string {
+  if (!roomName) return 'Ruangan Creative/Design';
+  if (roomName === 'Cabang Bandung') return 'Cabang Jawa';
+  return roomName;
+}
 
 export type VirtualOfficeRoomName =
   | 'Ruangan Creative/Design'
@@ -28,14 +49,29 @@ export type VirtualOfficeRoomName =
 
 export type AccessLevelType = 'standard' | 'executive' | 'developer';
 
-export type AvatarHairStyle = 'short' | 'parted' | 'long' | 'bun';
+export type AvatarGender = 'male' | 'female';
+
+export type AvatarHairStyle =
+  | 'short'
+  | 'medium_messy'
+  | 'side_part'
+  | 'fade'
+  | 'ponytail'
+  | 'long'
+  | 'bob_cut'
+  | 'parted'
+  | 'bun';
+
+export type AvatarOutfitType = 'short_sleeve' | 'formal_shirt' | 'long_sleeve';
 
 export interface Avatar3DConfig {
+  gender?: AvatarGender;
   shirtColor: string;
   hairStyle: AvatarHairStyle;
   hairColor: string;
   useHijab: boolean;
   hijabColor?: string;
+  outfitType?: AvatarOutfitType;
 }
 
 export interface StaffMemberRecord {
@@ -412,7 +448,7 @@ export const VIRTUAL_OFFICE_ROOMS: VirtualOfficeRoomDefinition[] = [
   },
   {
     roomName: 'Cabang Bandung',
-    subtitle: 'Bandung Regional Hub (Jl. Braga) — Separate 3D Building',
+    subtitle: 'Regional Hub Jawa — Separate 3D Building',
     branch: 'Bandung',
     accentColor: '#00B4D8',
     floorBounds: { centerX: 28.0, centerZ: 0.0, width: 9.2, depth: 6.8 },
@@ -2810,33 +2846,74 @@ const HIJAB_DEFAULT_STAFF_IDS = new Set([
   'rec_yanti',
 ]);
 
+const FEMALE_NAME_KEYWORDS = [
+  'hilda',
+  'ade',
+  'salima',
+  'zahra',
+  'erlita',
+  'novita',
+  'sesil',
+  'nana',
+  'tiara',
+  'izah',
+  'iza',
+  'yanti',
+];
+
+function inferDefaultGender(person: Pick<StaffMemberRecord, 'staffId' | 'name'>): AvatarGender {
+  if (HIJAB_DEFAULT_STAFF_IDS.has(person.staffId)) return 'female';
+  const lowerName = (person.name || '').trim().toLowerCase();
+  if (FEMALE_NAME_KEYWORDS.some((kw) => lowerName.includes(kw))) {
+    return 'female';
+  }
+  return 'male';
+}
+
 /**
  * Resolves the complete 3D Avatar Configuration for a staff member, merging any saved
  * customization with deterministic defaults based on their profile.
  */
 export function getStaffAvatar3DConfig(person: StaffMemberRecord): Avatar3DConfig {
   const defaultHijab = HIJAB_DEFAULT_STAFF_IDS.has(person.staffId);
+  const inferredGender = inferDefaultGender(person);
   const defaults: Avatar3DConfig = {
+    gender: inferredGender,
     shirtColor: person.avatarColor || '#00B4D8',
-    hairStyle: defaultHijab ? 'bun' : 'short',
+    hairStyle: defaultHijab
+      ? 'ponytail'
+      : inferredGender === 'female'
+      ? 'long'
+      : 'short',
     hairColor: '#1e293b',
     useHijab: defaultHijab,
     hijabColor: person.avatarColor || '#0277BD',
+    outfitType: 'formal_shirt',
   };
 
   if (!person.avatar3DConfig) {
     return defaults;
   }
 
+  const resolvedGender: AvatarGender =
+    person.avatar3DConfig.gender ||
+    (person.avatar3DConfig.useHijab ? 'female' : defaults.gender || 'male');
+
+  const resolvedUseHijab =
+    resolvedGender === 'male'
+      ? false
+      : person.avatar3DConfig.useHijab !== undefined
+      ? person.avatar3DConfig.useHijab
+      : defaults.useHijab;
+
   return {
+    gender: resolvedGender,
     shirtColor: person.avatar3DConfig.shirtColor || defaults.shirtColor,
     hairStyle: person.avatar3DConfig.hairStyle || defaults.hairStyle,
     hairColor: person.avatar3DConfig.hairColor || defaults.hairColor,
-    useHijab:
-      person.avatar3DConfig.useHijab !== undefined
-        ? person.avatar3DConfig.useHijab
-        : defaults.useHijab,
+    useHijab: resolvedUseHijab,
     hijabColor: person.avatar3DConfig.hijabColor || defaults.hijabColor,
+    outfitType: person.avatar3DConfig.outfitType || defaults.outfitType,
   };
 }
 
@@ -3737,11 +3814,13 @@ export function mapSupabasePersonnelToStaffRecord(
     photoUrl: cleanPhotoUrl || undefined,
     avatar3DConfig: meta.avatar3DConfig
       ? {
+          gender: meta.avatar3DConfig.gender,
           shirtColor: meta.avatar3DConfig.shirtColor || meta.avatarColor || '#00B4D8',
           hairStyle: meta.avatar3DConfig.hairStyle || 'short',
           hairColor: meta.avatar3DConfig.hairColor || '#1e293b',
           useHijab: Boolean(meta.avatar3DConfig.useHijab),
           hijabColor: meta.avatar3DConfig.hijabColor || '#0277BD',
+          outfitType: meta.avatar3DConfig.outfitType || 'formal_shirt',
         }
       : undefined,
     allowedAttendanceViewerIds: meta.allowedAttendanceViewerIds,
@@ -4127,8 +4206,8 @@ export const VIRTUAL_OFFICE_BUILDINGS: Record<
   },
   BANDUNG_BRANCH: {
     id: 'BANDUNG_BRANCH',
-    title: 'Bandung Branch',
-    subtitle: 'Bandung Regional Hub — Alfian & Yanti (Jl. Braga)',
+    title: 'GEDUNG JAWA',
+    subtitle: 'GEDUNG JAWA · Hub Regional',
     branch: 'Bandung',
     centerX: 28.0,
     centerZ: 0.0,
@@ -4137,13 +4216,13 @@ export const VIRTUAL_OFFICE_BUILDINGS: Record<
     wallHeight: 1.75,
     wallThickness: 0.32,
     entranceDoor: {
-      label: 'ENTRANCE DOOR · BDG',
+      label: 'ENTRANCE DOOR · JAWA',
       x: 25.8,
       z: 5.2,
       width: 2.3,
     },
     exitDoor: {
-      label: 'EXIT DOOR · BDG',
+      label: 'EXIT DOOR · JAWA',
       x: 30.2,
       z: 5.2,
       width: 2.3,
@@ -4154,10 +4233,16 @@ export const VIRTUAL_OFFICE_BUILDINGS: Record<
 };
 
 export function isBandungPersonnel(person: StaffMemberRecord): boolean {
+  const b = (person.branch || '').toLowerCase();
+  const loc = (person.location || '').toLowerCase();
+  const rm = (person.roomName || '').toLowerCase();
   return (
-    person.branch === 'Bandung' ||
-    person.location === 'Bandung' ||
-    person.roomName === 'Cabang Bandung'
+    b === 'bandung' ||
+    b === 'jawa' ||
+    loc === 'bandung' ||
+    loc === 'jawa' ||
+    rm.includes('bandung') ||
+    rm.includes('jawa')
   );
 }
 

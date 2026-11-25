@@ -14,7 +14,11 @@ import {
   Navigation,
   AlertTriangle,
 } from 'lucide-react';
-import { BranchType, FUTARI_HQ_ADDRESS } from '../utils/futariLogic';
+import {
+  BranchType,
+  FUTARI_HQ_ADDRESS,
+  formatBranchDisplay,
+} from '../utils/futariLogic';
 
 interface ActiveCheckInSummary {
   checkInTime: string;
@@ -54,7 +58,7 @@ interface PhotoWatermarkModalProps {
 const JAKARTA_HQ_COORDS = { lat: -6.2764, lon: 106.8019 };
 const BANDUNG_BRANCH_COORDS = { lat: -6.8898, lon: 107.6128 };
 const BANDUNG_BRANCH_ADDRESS =
-  'Futari Bandung Creative Hub, Jl. Ir. H. Juanda No. 88, Bandung';
+  'Futari Jawa Hub, Jl. Ir. H. Juanda No. 88';
 
 export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
   isOpen,
@@ -86,10 +90,10 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
   const [gpsFallbackWarning, setGpsFallbackWarning] = useState<string>('');
 
   const getOfficeAddress = (b: BranchType) =>
-    b === 'Bandung' ? BANDUNG_BRANCH_ADDRESS : FUTARI_HQ_ADDRESS;
+    formatBranchDisplay(b) === 'JAWA' ? BANDUNG_BRANCH_ADDRESS : FUTARI_HQ_ADDRESS;
 
   const getOfficeCoords = (b: BranchType) =>
-    b === 'Bandung' ? BANDUNG_BRANCH_COORDS : JAKARTA_HQ_COORDS;
+    formatBranchDisplay(b) === 'JAWA' ? BANDUNG_BRANCH_COORDS : JAKARTA_HQ_COORDS;
 
   const [detectedLatitude, setDetectedLatitude] = useState<number | null>(
     getOfficeCoords(branch).lat
@@ -103,11 +107,11 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
   const [mapsLinks, setMapsLinks] = useState<{ title: string; uri: string }[]>([
     {
       title:
-        branch === 'Bandung'
-          ? 'Futari Bandung Creative Hub'
+        formatBranchDisplay(branch) === 'JAWA'
+          ? 'Futari Jawa Hub'
           : 'Futari HQ Jakarta — Jl. Nusa Indah No.33, Cipete Selatan',
       uri:
-        branch === 'Bandung'
+        formatBranchDisplay(branch) === 'JAWA'
           ? 'https://www.google.com/maps/search/?api=1&query=Jalan+Ir+H+Juanda+88+Bandung'
           : 'https://www.google.com/maps/search/?api=1&query=Jl.+Nusa+Indah+No.33,+RT.14/RW.5,+Cipete+Sel.,+Kec.+Cilandak,+Kota+Jakarta+Selatan,+Daerah+Khusus+Ibukota+Jakarta+12410',
     },
@@ -123,6 +127,33 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
     initialFileName
   );
   const [selectedFile, setSelectedFile] = useState<File | null>(initialFile);
+  const [photoOrientation, setPhotoOrientation] = useState<'portrait' | 'landscape'>('landscape');
+  const [photoDimensions, setPhotoDimensions] = useState<{ width: number; height: number }>({
+    width: 640,
+    height: 360,
+  });
+
+  /**
+   * Computes proportional output canvas dimensions from any source (videoWidth/videoHeight or naturalWidth/naturalHeight)
+   * without stretching or squashing the photo.
+   */
+  const computeProportionalCanvasDimensions = useCallback(
+    (srcWidth: number, srcHeight: number): { width: number; height: number; orientation: 'portrait' | 'landscape' } => {
+      const validW = srcWidth > 0 ? srcWidth : 640;
+      const validH = srcHeight > 0 ? srcHeight : 360;
+      const isPortrait = validH > validW;
+      const maxEdge = 960;
+      const ratio = validW / validH;
+      const outW = isPortrait ? Math.max(360, Math.round(maxEdge * ratio)) : maxEdge;
+      const outH = isPortrait ? maxEdge : Math.max(360, Math.round(maxEdge / ratio));
+      return {
+        width: outW,
+        height: outH,
+        orientation: isPortrait ? 'portrait' : 'landscape',
+      };
+    },
+    []
+  );
 
   const stopCameraStream = useCallback(() => {
     if (streamRef.current) {
@@ -209,6 +240,130 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
     stopCameraStream,
   ]);
 
+  const drawWatermarkedOverlay = (
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    addressText: string
+  ) => {
+    const scale = Math.max(0.85, Math.min(w, h) / 460);
+    const padX = Math.round(14 * scale);
+    const padY = Math.round(14 * scale);
+    const tagH = Math.round(32 * scale);
+    const tagW = Math.round(230 * scale);
+    const branchLabel = formatBranchDisplay(branch);
+
+    // Top-left Mode & Live Verified Tag
+    ctx.fillStyle = 'rgba(2, 6, 23, 0.82)';
+    ctx.fillRect(padX, padY, tagW, tagH);
+    ctx.fillStyle = '#00B4D8';
+    ctx.font = `bold ${Math.round(12 * scale)}px "IBM Plex Mono", monospace`;
+    ctx.textAlign = 'left';
+    ctx.fillText(
+      `FUTARI CAM · ${selectedMode} (${branchLabel})`,
+      padX + Math.round(10 * scale),
+      padY + Math.round(20 * scale)
+    );
+
+    // Bottom Scrim for Timestamp & Google Maps Location Watermark (proportional to canvas dimensions)
+    const scrimH = Math.round(108 * scale);
+    ctx.fillStyle = 'rgba(2, 6, 23, 0.90)';
+    ctx.fillRect(0, h - scrimH, w, scrimH);
+
+    ctx.fillStyle = '#00B4D8';
+    ctx.font = `bold ${Math.round(12.5 * scale)}px "IBM Plex Mono", monospace`;
+    const dateStr = new Date().toLocaleDateString('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+    ctx.fillText(
+      `TIMESTAMP: ${dateStr} · ${checkInTime}:00 WIB`,
+      padX,
+      h - Math.round(78 * scale)
+    );
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `600 ${Math.round(13.5 * scale)}px "Plus Jakarta Sans", sans-serif`;
+    ctx.fillText(`${staffName} — ${role}`, padX, h - Math.round(54 * scale));
+
+    ctx.fillStyle = '#e2e8f0';
+    const addrFontPx = Math.round(11 * scale);
+    ctx.font = `${addrFontPx}px "Plus Jakarta Sans", sans-serif`;
+    const fullWatermarkText = `LOKASI: ${addressText}`;
+    const maxLineChars = Math.max(36, Math.floor((w - padX * 2) / (addrFontPx * 0.56)));
+    if (fullWatermarkText.length <= maxLineChars) {
+      ctx.fillText(fullWatermarkText, padX, h - Math.round(24 * scale));
+    } else {
+      const splitIdx = fullWatermarkText.lastIndexOf(' ', maxLineChars);
+      const breakPoint = splitIdx > 18 ? splitIdx : maxLineChars;
+      const watermarkLine1 = fullWatermarkText.slice(0, breakPoint).trim();
+      const watermarkLine2 = fullWatermarkText
+        .slice(breakPoint)
+        .trim()
+        .slice(0, maxLineChars + 6);
+      ctx.fillText(watermarkLine1, padX, h - Math.round(33 * scale));
+      if (watermarkLine2) {
+        ctx.fillText(watermarkLine2, padX, h - Math.round(14 * scale));
+      }
+    }
+  };
+
+  const renderUploadedImageWithWatermark = useCallback(
+    (srcUrl: string, originalFile: File | null, addressText: string) => {
+      if (!srcUrl || typeof Image === 'undefined') return;
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const natW = img.naturalWidth || img.width || 640;
+        const natH = img.naturalHeight || img.height || 360;
+        const dims = computeProportionalCanvasDimensions(natW, natH);
+        setPhotoOrientation(dims.orientation);
+        setPhotoDimensions({ width: dims.width, height: dims.height });
+
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        canvas.width = dims.width;
+        canvas.height = dims.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        ctx.clearRect(0, 0, dims.width, dims.height);
+        ctx.drawImage(img, 0, 0, dims.width, dims.height);
+        drawWatermarkedOverlay(ctx, dims.width, dims.height, addressText);
+
+        try {
+          const watermarkedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+          setPhotoDataUrl(watermarkedDataUrl);
+          canvas.toBlob(
+            (b) => {
+              if (b) {
+                const fName =
+                  originalFile?.name ||
+                  `checkin-${selectedMode.toLowerCase()}-${Date.now()}.jpg`;
+                setSelectedFile(new File([b], fName, { type: 'image/jpeg' }));
+              }
+            },
+            'image/jpeg',
+            0.92
+          );
+        } catch {
+          // Fallback to raw object URL if cross-origin taint occurs
+          setPhotoDataUrl(srcUrl);
+        }
+      };
+      img.src = srcUrl;
+    },
+    [
+      computeProportionalCanvasDimensions,
+      selectedMode,
+      branch,
+      checkInTime,
+      staffName,
+      role,
+    ]
+  );
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -218,54 +373,12 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
     setUploadedObjectUrl(objectUrl);
     setUploadedFileName(file.name);
     setPhotoDataUrl(objectUrl);
-  };
-
-  const drawWatermarkedOverlay = (
-    ctx: CanvasRenderingContext2D,
-    w: number,
-    h: number,
-    addressText: string
-  ) => {
-    // Top-left Mode & Live Verified Tag
-    ctx.fillStyle = 'rgba(2, 6, 23, 0.78)';
-    ctx.fillRect(14, 14, 210, 32);
-    ctx.fillStyle = '#00B4D8';
-    ctx.font = 'bold 12px "IBM Plex Mono", monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`FUTARI CAM · ${selectedMode} (${branch})`, 24, 34);
-
-    // Bottom Scrim for Timestamp & Google Maps Location Watermark
-    ctx.fillStyle = 'rgba(2, 6, 23, 0.88)';
-    ctx.fillRect(0, h - 102, w, 102);
-
-    ctx.fillStyle = '#00B4D8';
-    ctx.font = 'bold 12px "IBM Plex Mono", monospace';
-    const dateStr = new Date().toLocaleDateString('id-ID', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-    });
-    ctx.fillText(`TIMESTAMP: ${dateStr} · ${checkInTime}:00 WIB`, 16, h - 76);
-
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '600 13px "Plus Jakarta Sans", sans-serif';
-    ctx.fillText(`${staffName} — ${role}`, 16, h - 55);
-
-    ctx.fillStyle = '#cbd5e1';
-    ctx.font = '10.5px "Plus Jakarta Sans", sans-serif';
-    const fullWatermarkText = `LOKASI: ${addressText}`;
-    if (fullWatermarkText.length <= 72) {
-      ctx.fillText(fullWatermarkText, 16, h - 24);
-    } else {
-      const splitIdx = fullWatermarkText.lastIndexOf(' ', 72);
-      const breakPoint = splitIdx > 20 ? splitIdx : 72;
-      const watermarkLine1 = fullWatermarkText.slice(0, breakPoint).trim();
-      const watermarkLine2 = fullWatermarkText.slice(breakPoint).trim();
-      ctx.fillText(watermarkLine1, 16, h - 33);
-      if (watermarkLine2) {
-        ctx.fillText(watermarkLine2, 16, h - 15);
-      }
-    }
+    const activeAddress =
+      locationWatermark.trim() ||
+      (selectedMode === 'WFO'
+        ? getOfficeAddress(branch)
+        : 'Lokasi Event (WFE)');
+    renderUploadedImageWithWatermark(objectUrl, file, activeAddress);
   };
 
   const drawWatermarkedPhoto = (addressText: string) => {
@@ -344,8 +457,6 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
       return { file: selectedFile, dataUrl: uploadedObjectUrl || photoDataUrl };
     }
 
-    const w = canvas.width;
-    const h = canvas.height;
     const activeAddress =
       locationWatermark.trim() ||
       (selectedMode === 'WFO'
@@ -353,7 +464,18 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
         : 'Lokasi Event (WFE)');
 
     if (video && isCameraStreaming && video.readyState >= 2) {
-      // Mirror front camera horizontally so selfie looks natural
+      // Auto-detect native camera stream Portrait vs Landscape aspect ratio
+      const streamW = video.videoWidth || 640;
+      const streamH = video.videoHeight || 360;
+      const dims = computeProportionalCanvasDimensions(streamW, streamH);
+      canvas.width = dims.width;
+      canvas.height = dims.height;
+      setPhotoOrientation(dims.orientation);
+      setPhotoDimensions({ width: dims.width, height: dims.height });
+
+      const w = canvas.width;
+      const h = canvas.height;
+      // Mirror front camera horizontally so selfie looks natural without stretching
       ctx.save();
       ctx.translate(w, 0);
       ctx.scale(-1, 1);
@@ -409,18 +531,18 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
       setDetectedLongitude(officeCoords.lon);
       setLocationWatermark(officeAddr);
       setReviewSnippet(
-        branch === 'Bandung'
-          ? 'Lokasi Kantor: Futari Bandung Creative Hub'
+        formatBranchDisplay(branch) === 'JAWA'
+          ? 'Lokasi Kantor: Futari Jawa Hub'
           : 'Lokasi Kantor: Futari HQ Jakarta (Cipete Selatan)'
       );
       setMapsLinks([
         {
           title:
-            branch === 'Bandung'
-              ? 'Futari Bandung Creative Hub'
+            formatBranchDisplay(branch) === 'JAWA'
+              ? 'Futari Jawa Hub'
               : 'Futari HQ Jakarta — Jl. Nusa Indah No.33, Cipete Selatan',
           uri:
-            branch === 'Bandung'
+            formatBranchDisplay(branch) === 'JAWA'
               ? 'https://www.google.com/maps/search/?api=1&query=Jalan+Ir+H+Juanda+88+Bandung'
               : 'https://www.google.com/maps/search/?api=1&query=Jl.+Nusa+Indah+No.33,+RT.14/RW.5,+Cipete+Sel.,+Kec.+Cilandak,+Kota+Jakarta+Selatan,+Daerah+Khusus+Ibukota+Jakarta+12410',
         },
@@ -622,11 +744,11 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                 </p>
               )}
               {activeCheckIn.photoDataUrl && (
-                <div className="rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
+                <div className="rounded-xl overflow-hidden border border-slate-700 bg-slate-950 flex items-center justify-center p-1.5">
                   <img
                     src={activeCheckIn.photoDataUrl}
                     alt="Foto Check-In Hari Ini"
-                    className="w-full h-48 object-cover block"
+                    className="w-full max-h-72 object-contain rounded-lg block mx-auto"
                   />
                 </div>
               )}
@@ -699,23 +821,44 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
               </div>
             )}
 
-            {/* Live Front Camera Viewfinder OR Captured/Uploaded Preview */}
-            <div className="relative rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
+            {/* Live Front Camera Viewfinder OR Captured/Uploaded Preview (Auto-Detect Portrait / Landscape Anti-Gepeng) */}
+            <div
+              data-testid="photo-preview-container"
+              data-photo-orientation={photoOrientation}
+              className="relative rounded-xl overflow-hidden border border-slate-700 bg-slate-950 flex flex-col items-center justify-center"
+            >
               {isCameraStreaming && !uploadedObjectUrl ? (
-                <div className="relative">
+                <div className="relative w-full flex items-center justify-center bg-slate-950">
                   <video
                     ref={videoRef}
                     autoPlay
                     playsInline
                     muted
+                    onLoadedMetadata={(e) => {
+                      const v = e.currentTarget;
+                      if (v.videoWidth > 0 && v.videoHeight > 0) {
+                        const dims = computeProportionalCanvasDimensions(
+                          v.videoWidth,
+                          v.videoHeight
+                        );
+                        setPhotoOrientation(dims.orientation);
+                        setPhotoDimensions({ width: dims.width, height: dims.height });
+                        if (canvasRef.current) {
+                          canvasRef.current.width = dims.width;
+                          canvasRef.current.height = dims.height;
+                        }
+                      }
+                    }}
                     data-testid="live-front-camera-video"
-                    className="w-full h-60 object-cover block scale-x-[-1]"
+                    className="w-full max-h-[360px] object-contain block scale-x-[-1] mx-auto"
                   />
-                  <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-950/80 border border-[#00B4D8]/40 text-[11px] font-mono font-bold text-[#00B4D8] flex items-center gap-1.5">
+                  <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-950/85 border border-[#00B4D8]/40 text-[11px] font-mono font-bold text-[#00B4D8] flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>LIVE FRONT CAM · {selectedMode}</span>
+                    <span>
+                      LIVE FRONT CAM · {selectedMode} ({photoOrientation.toUpperCase()})
+                    </span>
                   </div>
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950 via-slate-950/80 to-transparent p-3 flex items-center justify-between gap-2">
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950 via-slate-950/85 to-transparent p-3 flex items-center justify-between gap-2">
                     <div className="text-[11px] text-slate-200 truncate">
                       <p className="font-mono font-bold text-[#00B4D8]">
                         {checkInTime} WIB · {staffName}
@@ -738,13 +881,27 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                   </div>
                 </div>
               ) : uploadedObjectUrl ? (
-                <div className="relative">
+                <div className="relative w-full flex flex-col items-center justify-center bg-slate-950">
                   <img
-                    src={uploadedObjectUrl}
+                    src={photoDataUrl || uploadedObjectUrl}
                     alt="Real Uploaded Check-In Preview"
                     data-testid="checkin-modal-real-photo-preview"
-                    className="w-full h-60 object-cover block"
+                    onLoad={(e) => {
+                      const imgEl = e.currentTarget;
+                      if (imgEl.naturalWidth > 0 && imgEl.naturalHeight > 0) {
+                        const dims = computeProportionalCanvasDimensions(
+                          imgEl.naturalWidth,
+                          imgEl.naturalHeight
+                        );
+                        setPhotoOrientation(dims.orientation);
+                        setPhotoDimensions({ width: dims.width, height: dims.height });
+                      }
+                    }}
+                    className="w-full max-h-[380px] object-contain block mx-auto"
                   />
+                  <div className="absolute top-3 left-3 px-2 py-1 rounded-md bg-slate-950/85 border border-slate-700 text-[10px] font-mono text-emerald-400">
+                    {photoOrientation.toUpperCase()} ({photoDimensions.width}×{photoDimensions.height})
+                  </div>
                   <div className="absolute top-3 right-3">
                     <button
                       type="button"
@@ -755,14 +912,14 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
                       <span>Foto Ulang</span>
                     </button>
                   </div>
-                  <div className="absolute inset-x-0 bottom-0 bg-slate-950/85 p-3 border-t border-slate-800 text-xs">
+                  <div className="w-full bg-slate-950/95 p-3 border-t border-slate-800 text-xs">
                     <p className="font-mono font-bold text-[#00B4D8]">
-                      TIMESTAMP: {checkInTime} WIB · {selectedMode} ({branch})
+                      TIMESTAMP: {checkInTime} WIB · {selectedMode} ({formatBranchDisplay(branch)})
                     </p>
                     <p className="font-semibold text-white mt-0.5">
                       {staffName} — {role}
                     </p>
-                    <p className="text-[11px] text-slate-300 truncate mt-0.5">
+                    <p className="text-[11px] text-slate-300 break-words mt-0.5">
                       LOKASI: {finalResolvedAddress}
                     </p>
                   </div>
@@ -771,12 +928,12 @@ export const PhotoWatermarkModal: React.FC<PhotoWatermarkModalProps> = ({
 
               <canvas
                 ref={canvasRef}
-                width={520}
-                height={300}
+                width={photoDimensions.width}
+                height={photoDimensions.height}
                 className={
                   isCameraStreaming || uploadedObjectUrl
                     ? 'hidden'
-                    : 'w-full h-auto block'
+                    : 'w-full max-h-[360px] object-contain block mx-auto'
                 }
               />
             </div>

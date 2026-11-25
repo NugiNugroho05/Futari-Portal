@@ -178,7 +178,7 @@ export const SopManagementTab: React.FC<SopManagementTabProps> = ({
               SOP Perusahaan (Standard Operating Procedures Futari)
             </h1>
             <p className={`text-xs md:text-sm mt-1 break-words ${mutedText}`}>
-              Pedoman resmi operasional Jakarta HQ &amp; Bandung Creative Hub.
+              Pedoman resmi operasional Jakarta HQ &amp; Jawa Hub.
               Seluruh personel wajib mematuhi SOP yang berlaku.
             </p>
           </div>

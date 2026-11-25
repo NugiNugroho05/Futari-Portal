@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import * as THREE from 'three';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   User,
@@ -32,13 +33,19 @@ import {
   AttendanceRecord,
   VirtualOfficeRoomName,
   VIRTUAL_OFFICE_ROOMS,
+  AvatarGender,
   AvatarHairStyle,
+  AvatarOutfitType,
+  Avatar3DConfig,
   SelfServiceProfileUpdateInput,
   getDirectReportsForSupervisor,
   getStaffAvatar3DConfig,
   encodePersonnelAvatarUrlWithMetadata,
   canViewAllAttendance,
+  formatBranchDisplay,
+  formatRoomDisplayName,
 } from '../utils/futariLogic';
+import { buildRobloxStylizedCharacter } from './VirtualOffice3D';
 
 interface ProfileTabProps {
   currentUser: StaffMemberRecord;
@@ -74,6 +81,172 @@ const HAIR_COLOR_PRESETS = [
   { label: 'Silver Ash', hex: '#64748b' },
   { label: 'Golden Blonde', hex: '#ca8a04' },
 ];
+
+const OUTFIT_TYPE_LABELS: Record<AvatarOutfitType, string> = {
+  short_sleeve: 'Kaos Lengan Pendek',
+  formal_shirt: 'Kemeja Formal (Kerah & Kancing)',
+  long_sleeve: 'Lengan Panjang',
+};
+
+const MALE_HAIR_OPTIONS: Array<{ value: AvatarHairStyle; label: string }> = [
+  { value: 'short', label: 'Short Crop (Pendek Rapi)' },
+  { value: 'medium_messy', label: 'Medium Messy (Berlapis Modern)' },
+  { value: 'side_part', label: 'Side Part (Belah Samping)' },
+  { value: 'fade', label: 'Fade (Undercut Rapi)' },
+];
+
+const FEMALE_HAIR_OPTIONS: Array<{ value: AvatarHairStyle; label: string }> = [
+  { value: 'ponytail', label: 'Ponytail (Kuncir Belakang)' },
+  { value: 'long', label: 'Long Hair (Panjang Terurai)' },
+  { value: 'bob_cut', label: 'Bob Cut (Sebahu Rapi)' },
+];
+
+/**
+ * Live Real-Time 3D Roblox-Style Avatar Preview Component inside User Profile (Spacious Left Column)
+ */
+const RobloxAvatar3DPreviewCanvas: React.FC<{
+  cfg: Avatar3DConfig;
+}> = ({ cfg }) => {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const cfgRef = useRef<Avatar3DConfig>(cfg);
+  cfgRef.current = cfg;
+
+  const rebuildFnRef = useRef<((nextCfg: Avatar3DConfig) => void) | null>(null);
+
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+
+    const w = 240;
+    const h = 230;
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(32, w / h, 0.1, 20);
+    camera.position.set(0, 0.85, 2.45);
+    camera.lookAt(0, 0.74, 0);
+
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+      });
+      renderer.setSize(w, h);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      container.innerHTML = '';
+      container.appendChild(renderer.domElement);
+    } catch {
+      return;
+    }
+
+    const ambient = new THREE.AmbientLight(0xffffff, 1.4);
+    scene.add(ambient);
+
+    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.8);
+    keyLight.position.set(2.4, 3.6, 3.4);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.9);
+    rimLight.position.set(-2.2, 2.2, -2.0);
+    scene.add(rimLight);
+
+    // Subtle glowing pedestal ring under character
+    const pedestalGeo = new THREE.CylinderGeometry(0.4, 0.44, 0.05, 28);
+    const pedestalMat = new THREE.MeshStandardMaterial({
+      color: 0x0284c7,
+      emissive: 0x00b4d8,
+      emissiveIntensity: 0.35,
+      roughness: 0.3,
+    });
+    const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
+    pedestal.position.set(0, 0.01, 0);
+    scene.add(pedestal);
+
+    let activeBuild = buildRobloxStylizedCharacter(cfgRef.current, 'profile_preview');
+    scene.add(activeBuild.characterGroup);
+
+    const rebuildCharacter = (nextCfg: Avatar3DConfig) => {
+      scene.remove(activeBuild.characterGroup);
+      activeBuild.characterGroup.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((m) => {
+            const matWithMap = m as THREE.Material & { map?: THREE.Texture | null };
+            if (matWithMap.map) {
+              matWithMap.map.dispose();
+            }
+            m.dispose();
+          });
+        }
+      });
+      activeBuild = buildRobloxStylizedCharacter(nextCfg, 'profile_preview');
+      scene.add(activeBuild.characterGroup);
+    };
+    rebuildFnRef.current = rebuildCharacter;
+
+    let animId = 0;
+    const clock = new THREE.Clock();
+    const animate = () => {
+      animId = requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+
+      // Smooth idle breathing, gentle turntable sway & limb movement (keeps face clearly visible)
+      activeBuild.characterGroup.position.y = Math.sin(t * 2.2) * 0.016 + 0.03;
+      activeBuild.characterGroup.rotation.y = Math.sin(t * 0.85) * 0.34;
+      const armSway = Math.sin(t * 2.1) * 0.09;
+      activeBuild.leftArmGroup.rotation.x = armSway;
+      activeBuild.rightArmGroup.rotation.x = -armSway;
+      activeBuild.headGroup.rotation.y = Math.sin(t * 1.3) * 0.07;
+
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    return () => {
+      rebuildFnRef.current = null;
+      cancelAnimationFrame(animId);
+      pedestalGeo.dispose();
+      pedestalMat.dispose();
+      renderer.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    rebuildFnRef.current?.(cfg);
+  }, [
+    cfg.gender,
+    cfg.shirtColor,
+    cfg.hairStyle,
+    cfg.hairColor,
+    cfg.useHijab,
+    cfg.hijabColor,
+    cfg.outfitType,
+  ]);
+
+  return (
+    <div
+      data-testid="avatar-3d-live-preview"
+      className="flex flex-col items-center justify-center p-4 rounded-2xl bg-slate-950/90 border border-slate-800 h-full space-y-3"
+    >
+      <div className="w-full flex items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#00B4D8]/15 text-[#00B4D8] font-mono font-bold text-[10px]">
+          <Sparkles className="w-3 h-3" />
+          <span>LIVE 3D ROBLOX PREVIEW</span>
+        </span>
+        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-900 text-slate-300 border border-slate-800">
+          {cfg.gender === 'female' ? 'Wanita' : 'Pria'}
+        </span>
+      </div>
+
+      <div className="relative w-full h-[240px] rounded-xl bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900 border border-slate-800/80 flex items-center justify-center overflow-hidden">
+        <div ref={mountRef} className="w-[240px] h-[230px] flex items-center justify-center" />
+      </div>
+    </div>
+  );
+};
 
 export const ProfileTab: React.FC<ProfileTabProps> = ({
   currentUser,
@@ -116,7 +289,13 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   );
 
   // 3D Avatar Customization State
+  const [gender, setGender] = useState<AvatarGender>(
+    current3D.gender || (current3D.useHijab ? 'female' : 'male')
+  );
   const [shirtColor, setShirtColor] = useState<string>(current3D.shirtColor);
+  const [outfitType, setOutfitType] = useState<AvatarOutfitType>(
+    current3D.outfitType || 'formal_shirt'
+  );
   const [hairStyle, setHairStyle] = useState<AvatarHairStyle>(
     current3D.hairStyle
   );
@@ -125,6 +304,20 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   const [hijabColor, setHijabColor] = useState<string>(
     current3D.hijabColor || currentUser.avatarColor
   );
+
+  const handleSelectGender = (nextGender: AvatarGender) => {
+    setGender(nextGender);
+    if (nextGender === 'male') {
+      setUseHijab(false);
+      if (!MALE_HAIR_OPTIONS.some((o) => o.value === hairStyle)) {
+        setHairStyle('short');
+      }
+    } else {
+      if (!FEMALE_HAIR_OPTIONS.some((o) => o.value === hairStyle)) {
+        setHairStyle('ponytail');
+      }
+    }
+  };
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
   const [saveProfileError, setSaveProfileError] = useState<string | null>(null);
   const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
@@ -153,10 +346,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
         password: editPassword.trim() || currentUser.password,
         avatarColor: editAvatarColor || currentUser.avatarColor,
         avatar3DConfig: {
+          gender,
           shirtColor,
+          outfitType,
           hairStyle,
           hairColor,
-          useHijab,
+          useHijab: gender === 'male' ? false : useHijab,
           hijabColor,
         },
         allowedAttendanceViewerIds: currentUser.allowedAttendanceViewerIds,
@@ -373,10 +568,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
     setEditRoomName(currentUser.roomName);
     setEditAvatarColor(currentUser.avatarColor);
     setEditPhotoUrl(currentUser.photoUrl || '');
+    setGender(cfg.gender || (cfg.useHijab ? 'female' : 'male'));
     setShirtColor(cfg.shirtColor);
+    setOutfitType(cfg.outfitType || 'formal_shirt');
     setHairStyle(cfg.hairStyle);
     setHairColor(cfg.hairColor);
-    setUseHijab(cfg.useHijab);
+    setUseHijab(cfg.gender === 'male' ? false : cfg.useHijab);
     setHijabColor(cfg.hijabColor || currentUser.avatarColor);
   }, [currentUser, personnelList]);
 
@@ -388,7 +585,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   const fullLocationName =
     currentUser.branch === 'JKT'
       ? 'Jakarta (Jl. Nusa Indah No.33, RT.14/RW.5, Cipete Sel., Kec. Cilandak, Kota Jakarta Selatan, Daerah Khusus Ibukota Jakarta 12410)'
-      : 'Bandung (BDG — Braga Creative Hub)';
+      : 'Jawa (Regional Hub Jawa)';
 
   // Filter personnel who have the currently active user set as their supervisor
   const directReports = useMemo(
@@ -470,10 +667,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
         avatarColor: editAvatarColor,
         photoUrl: editPhotoUrl.trim() || undefined,
         avatar3DConfig: {
+          gender,
           shirtColor,
+          outfitType,
           hairStyle,
           hairColor,
-          useHijab,
+          useHijab: gender === 'male' ? false : useHijab,
           hijabColor,
         },
       });
@@ -658,12 +857,6 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 <span className="px-2.5 py-0.5 rounded-md text-xs font-semibold bg-[#00B4D8]/15 text-[#00B4D8]">
                   {currentUser.division}
                 </span>
-                <span className="px-2.5 py-0.5 rounded-md text-xs font-mono bg-emerald-500/15 text-emerald-400">
-                  Status: {currentUser.workMode} ({currentUser.checkInTime} WIB)
-                </span>
-                <span className="px-2.5 py-0.5 rounded-md text-xs font-mono bg-violet-500/15 text-violet-300">
-                  3D: {current3D.useHijab ? 'Hijab Mode' : `Hair: ${current3D.hairStyle}`}
-                </span>
               </div>
               <h2
                 data-testid="profile-name"
@@ -724,16 +917,13 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             <div className="text-xs">
               <p className="font-bold">ID Card Digital Futari</p>
               <p className="text-[#00B4D8] font-semibold">
-                {currentUser.roomName}
-              </p>
-              <p className={`font-mono text-[11px] ${mutedText}`}>
-                ID: {currentUser.staffId.toUpperCase()}
+                {formatRoomDisplayName(currentUser.roomName)}
               </p>
             </div>
           </div>
         </div>
 
-        {/* 6 Mandatory Profile Attributes Grid */}
+        {/* 6 Mandatory Profile Attributes Grid (Clean & Minimalist) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-6">
           <div
             className={`p-4 rounded-xl border ${
@@ -745,9 +935,6 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
               <span>Nama Lengkap Karyawan</span>
             </div>
             <p className="text-base font-bold mt-1.5">{currentUser.name}</p>
-            <p className={`text-[11px] mt-0.5 ${mutedText}`}>
-              Terdaftar di Direktori {staffList.length} Personel
-            </p>
           </div>
 
           <div
@@ -760,9 +947,6 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
               <span>Jabatan (Role)</span>
             </div>
             <p className="text-base font-bold mt-1.5">{currentUser.role}</p>
-            <p className={`text-[11px] mt-0.5 ${mutedText}`}>
-              Zona Meja Virtual: {currentUser.deskZone}
-            </p>
           </div>
 
           <div
@@ -795,10 +979,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
               data-testid="profile-supervisor"
               className="text-base font-bold mt-1.5"
             >
-              Direct Supervisor: {resolvedSupervisorName || currentUser.supervisor || '-'}
-            </p>
-            <p className={`text-[11px] mt-0.5 ${mutedText}`}>
-              Persetujuan Cuti, Lembur &amp; Petty Cash
+              {resolvedSupervisorName || currentUser.supervisor || '-'}
             </p>
           </div>
 
@@ -809,16 +990,13 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
           >
             <div className="flex items-center gap-2 text-xs text-[#00B4D8] font-semibold">
               <MapPin className="w-4 h-4" />
-              <span>Lokasi Penempatan (Location)</span>
+              <span>Lokasi Penempatan</span>
             </div>
             <p
               data-testid="profile-location"
               className="text-base font-bold mt-1.5"
             >
-              {fullLocationName}
-            </p>
-            <p className={`text-[11px] mt-0.5 ${mutedText}`}>
-              Cabang Utama: {currentUser.branch}
+              {formatBranchDisplay(currentUser.branch)}
             </p>
           </div>
 
@@ -829,13 +1007,10 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
           >
             <div className="flex items-center gap-2 text-xs text-[#00B4D8] font-semibold">
               <Clock className="w-4 h-4" />
-              <span>Rekap Kehadiran Siklus Aktif</span>
+              <span>Rekap Kehadiran</span>
             </div>
             <p className="text-base font-bold font-mono mt-1.5">
               Telat: {currentUser.lateMinutesMonth} Menit
-            </p>
-            <p className={`text-[11px] mt-0.5 ${mutedText}`}>
-              Siklus: {payrollCycleLabel} ({userAttendanceLogs.length} log)
             </p>
           </div>
         </div>
@@ -879,358 +1054,400 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Left 7 Cols: Personal Info & Supervisor/Team Self-Service */}
-            <div className="lg:col-span-7 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label
-                    htmlFor="self-edit-name-input"
-                    className="block text-xs font-semibold text-[#00B4D8] mb-1"
-                  >
-                    Nama Lengkap Anda
-                  </label>
-                  <input
-                    id="self-edit-name-input"
-                    data-testid="self-edit-name-input"
-                    type="text"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    className={`w-full px-3 py-2 rounded-lg text-xs border ${
-                      isDark
-                        ? 'bg-slate-900 border-slate-700 text-white'
-                        : 'bg-white border-slate-300 text-slate-900'
-                    }`}
-                  />
-                </div>
+          {/* ===============================================================
+              TOP FULL-WIDTH SECTION: PERSONAL INFO & TEAM SELF-SERVICE
+             =============================================================== */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div>
+              <label
+                htmlFor="self-edit-name-input"
+                className="block text-xs font-semibold text-[#00B4D8] mb-1"
+              >
+                Nama Lengkap Anda
+              </label>
+              <input
+                id="self-edit-name-input"
+                data-testid="self-edit-name-input"
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs border ${
+                  isDark
+                    ? 'bg-slate-900 border-slate-700 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              />
+            </div>
 
-                <div>
-                  <label
-                    htmlFor="self-edit-password-input"
-                    className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
-                  >
-                    <KeyRound className="w-3.5 h-3.5" />
-                    <span>Password Akun</span>
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="self-edit-password-input"
-                      data-testid="self-edit-password-input"
-                      type={showPassword ? 'text' : 'password'}
-                      value={editPassword}
-                      onChange={(e) => setEditPassword(e.target.value)}
-                      placeholder="Masukkan password baru (min. 6 karakter)"
-                      className={`w-full px-3 py-2 pr-9 rounded-lg text-xs border ${
-                        isDark
-                          ? 'bg-slate-900 border-slate-700 text-white'
-                          : 'bg-white border-slate-300 text-slate-900'
-                      }`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      tabIndex={-1}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#00B4D8] cursor-pointer"
-                      title={showPassword ? 'Hide password' : 'Show password'}
-                    >
-                      {showPassword ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label
-                    htmlFor="self-edit-supervisor-select"
-                    className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
-                  >
-                    <UserCheck className="w-3.5 h-3.5" />
-                    <span>Direct Supervisor (Report To)</span>
-                  </label>
-                  <select
-                    id="self-edit-supervisor-select"
-                    data-testid="self-edit-supervisor-select"
-                    value={editSupervisor}
-                    onChange={(e) => setEditSupervisor(e.target.value)}
-                    className={`w-full px-3 py-2 rounded-lg text-xs border ${
-                      isDark
-                        ? 'bg-slate-900 border-slate-700 text-white'
-                        : 'bg-white border-slate-300 text-slate-900'
-                    }`}
-                  >
-                    <option value="">-- Pilih Atasan Langsung (Direct Supervisor) --</option>
-                    <option value="Board of Founders Futari (Top Executive)">
-                      Board of Founders Futari (Top Executive)
-                    </option>
-                    {supervisorCandidates.map((sup) => (
-                      <option key={sup.id} value={sup.email}>
-                        {sup.name} ({sup.role})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="self-edit-room-select"
-                    className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
-                  >
-                    <Building2 className="w-3.5 h-3.5" />
-                    <span>Ruangan / Team Virtual Office</span>
-                  </label>
-                  <select
-                    id="self-edit-room-select"
-                    data-testid="self-edit-room-select"
-                    value={editRoomName}
-                    onChange={(e) =>
-                      setEditRoomName(e.target.value as VirtualOfficeRoomName)
-                    }
-                    className={`w-full px-3 py-2 rounded-lg text-xs border ${
-                      isDark
-                        ? 'bg-slate-900 border-slate-700 text-white'
-                        : 'bg-white border-slate-300 text-slate-900'
-                    }`}
-                  >
-                    {VIRTUAL_OFFICE_ROOMS.map((room) => (
-                      <option key={room.roomName} value={room.roomName}>
-                        {room.roomName}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label
-                    htmlFor="self-edit-avatar-color"
-                    className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
-                  >
-                    <Palette className="w-3.5 h-3.5" />
-                    <span>Warna Badge Avatar 2D</span>
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      id="self-edit-avatar-color"
-                      type="color"
-                      value={editAvatarColor}
-                      onChange={(e) => setEditAvatarColor(e.target.value)}
-                      className="w-10 h-9 rounded border border-slate-700 cursor-pointer bg-transparent"
-                    />
-                    <span className="text-xs font-mono">{editAvatarColor}</span>
-                  </div>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="self-edit-photo-url"
-                    className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
-                  >
-                    <Camera className="w-3.5 h-3.5" />
-                    <span>URL Foto Profil (Opsional)</span>
-                  </label>
-                  <input
-                    id="self-edit-photo-url"
-                    type="text"
-                    value={editPhotoUrl}
-                    onChange={(e) => setEditPhotoUrl(e.target.value)}
-                    placeholder="Kosongkan untuk Avatar Inisial..."
-                    className={`w-full px-3 py-2 rounded-lg text-xs border ${
-                      isDark
-                        ? 'bg-slate-900 border-slate-700 text-white'
-                        : 'bg-white border-slate-300 text-slate-900'
-                    }`}
-                  />
-                </div>
+            <div>
+              <label
+                htmlFor="self-edit-password-input"
+                className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Password Akun</span>
+              </label>
+              <div className="relative">
+                <input
+                  id="self-edit-password-input"
+                  data-testid="self-edit-password-input"
+                  type={showPassword ? 'text' : 'password'}
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                  placeholder="Masukkan password baru (min. 6 karakter)"
+                  className={`w-full px-3 py-2.5 pr-9 rounded-xl text-xs border ${
+                    isDark
+                      ? 'bg-slate-900 border-slate-700 text-white'
+                      : 'bg-white border-slate-300 text-slate-900'
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  tabIndex={-1}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#00B4D8] cursor-pointer"
+                  title={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
               </div>
             </div>
 
-            {/* Right 5 Cols: 3D Avatar Customization Panel (Shirt Color, Hair Style/Color, Hijab Toggle) */}
-            <div
-              data-testid="avatar-3d-customization-panel"
-              className={`lg:col-span-5 p-4 rounded-xl border ${
-                isDark
-                  ? 'bg-slate-900/90 border-slate-800'
-                  : 'bg-white border-slate-200'
-              } space-y-4`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-[#00B4D8]">
-                  <Sparkles className="w-4 h-4" />
-                  <h4 className="text-xs font-bold uppercase tracking-wider">
-                    3D Avatar Settings (Virtual Office)
-                  </h4>
-                </div>
+            <div>
+              <label
+                htmlFor="self-edit-supervisor-select"
+                className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
+              >
+                <UserCheck className="w-3.5 h-3.5" />
+                <span>Direct Supervisor (Report To)</span>
+              </label>
+              <select
+                id="self-edit-supervisor-select"
+                data-testid="self-edit-supervisor-select"
+                value={editSupervisor}
+                onChange={(e) => setEditSupervisor(e.target.value)}
+                className={`w-full px-3 py-2.5 rounded-xl text-xs border ${
+                  isDark
+                    ? 'bg-slate-900 border-slate-700 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              >
+                <option value="">-- Pilih Atasan Langsung (Direct Supervisor) --</option>
+                <option value="Board of Founders Futari (Top Executive)">
+                  Board of Founders Futari (Top Executive)
+                </option>
+                {supervisorCandidates.map((sup) => (
+                  <option key={sup.id} value={sup.email}>
+                    {sup.name} ({sup.role})
+                  </option>
+                ))}
+              </select>
+            </div>
 
-                {/* Live Mini 3D Silhouette Preview */}
-                <div
-                  data-testid="avatar-3d-live-preview"
-                  className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800"
-                >
-                  <div className="relative w-7 h-9 flex flex-col items-center justify-end">
-                    {/* Head + Hair/Hijab */}
-                    <div
-                      className="w-4 h-4 rounded-full relative z-10 border border-black/20"
-                      style={{
-                        backgroundColor: useHijab ? hijabColor : '#f1c27d',
-                      }}
-                    >
-                      {!useHijab && (
-                        <div
-                          className="w-4 h-2 rounded-t-full absolute -top-0.5 inset-x-0"
-                          style={{ backgroundColor: hairColor }}
-                        />
-                      )}
-                    </div>
-                    {/* Torso / Shirt */}
-                    <div
-                      className="w-6 h-4 rounded-t-md -mt-0.5"
-                      style={{ backgroundColor: shirtColor }}
-                    />
-                  </div>
-                  <div className="text-[10px] font-mono leading-tight">
-                    <p className="text-white font-bold">Preview 3D</p>
-                    <p className="text-[#00B4D8]">
-                      {useHijab ? 'Hijab Aktif' : `Rambut: ${hairStyle}`}
-                    </p>
-                  </div>
-                </div>
+            <div className="sm:col-span-2">
+              <label
+                htmlFor="self-edit-room-select"
+                className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
+              >
+                <Building2 className="w-3.5 h-3.5" />
+                <span>Ruangan / Team Virtual Office</span>
+              </label>
+              <select
+                id="self-edit-room-select"
+                data-testid="self-edit-room-select"
+                value={editRoomName}
+                onChange={(e) =>
+                  setEditRoomName(e.target.value as VirtualOfficeRoomName)
+                }
+                className={`w-full px-3 py-2.5 rounded-xl text-xs border ${
+                  isDark
+                    ? 'bg-slate-900 border-slate-700 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              >
+                {VIRTUAL_OFFICE_ROOMS.map((room) => (
+                  <option key={room.roomName} value={room.roomName}>
+                    {formatRoomDisplayName(room.roomName)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="self-edit-avatar-color"
+                className="block text-xs font-semibold text-[#00B4D8] mb-1 flex items-center gap-1"
+              >
+                <Palette className="w-3.5 h-3.5" />
+                <span>Warna Badge Avatar 2D</span>
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="self-edit-avatar-color"
+                  type="color"
+                  value={editAvatarColor}
+                  onChange={(e) => setEditAvatarColor(e.target.value)}
+                  className="w-10 h-10 rounded-lg border border-slate-700 cursor-pointer bg-transparent"
+                />
+                <span className="text-xs font-mono">{editAvatarColor}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ===============================================================
+              BOTTOM SPACIOUS CARD: 3D AVATAR SETTINGS (2-COLUMN LAYOUT)
+             =============================================================== */}
+          <div
+            data-testid="avatar-3d-customization-panel"
+            className={`mt-6 p-5 sm:p-6 rounded-2xl border ${
+              isDark
+                ? 'bg-slate-900/90 border-slate-800'
+                : 'bg-white border-slate-200'
+            } space-y-5`}
+          >
+            <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-700/30">
+              <div className="flex items-center gap-2 text-[#00B4D8]">
+                <Sparkles className="w-4 h-4" />
+                <h4 className="text-sm font-bold uppercase tracking-wider font-display">
+                  3D Avatar Settings
+                </h4>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+              {/* Left 5 Cols: Large Real-Time 3D Roblox Avatar Preview */}
+              <div className="lg:col-span-5">
+                <RobloxAvatar3DPreviewCanvas
+                  cfg={{
+                    gender,
+                    shirtColor,
+                    outfitType,
+                    hairStyle,
+                    hairColor,
+                    useHijab: gender === 'male' ? false : useHijab,
+                    hijabColor,
+                  }}
+                />
               </div>
 
-              {/* 1. Shirt Color */}
-              <div>
-                <label className="block text-xs font-semibold mb-1.5">
-                  1. Warna Baju 3D (Shirt Color):{' '}
-                  <span className="font-mono text-[#00B4D8]">{shirtColor}</span>
-                </label>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {SHIRT_COLOR_PRESETS.map((preset) => (
-                    <button
-                      key={preset.hex}
-                      type="button"
-                      title={preset.label}
-                      data-testid={`shirt-color-preset-${preset.hex}`}
-                      onClick={() => setShirtColor(preset.hex)}
-                      className={`w-6 h-6 rounded-lg border transition-transform cursor-pointer ${
-                        shirtColor.toLowerCase() === preset.hex.toLowerCase()
-                          ? 'ring-2 ring-white scale-110 border-white'
-                          : 'border-slate-700 opacity-80 hover:opacity-100'
-                      }`}
-                      style={{ backgroundColor: preset.hex }}
-                    />
-                  ))}
-                  <input
-                    type="color"
-                    aria-label="Pilih Shirt Color Kustom"
-                    data-testid="avatar-3d-shirt-color-input"
-                    value={shirtColor}
-                    onChange={(e) => setShirtColor(e.target.value)}
-                    className="w-7 h-6 rounded cursor-pointer bg-transparent border border-slate-700"
-                  />
-                </div>
-              </div>
-
-              {/* 2. Hijab Toggle */}
-              <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950/60 border border-slate-800">
-                <div>
-                  <p className="text-xs font-bold text-white">
-                    2. Gunakan Hijab 3D (Hijab Toggle)
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    Menampilkan mesh Hijab 3D di Virtual Office
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  {useHijab && (
-                    <input
-                      type="color"
-                      aria-label="Warna Hijab 3D"
-                      value={hijabColor}
-                      onChange={(e) => setHijabColor(e.target.value)}
-                      title="Pilih Warna Hijab"
-                      className="w-6 h-6 rounded cursor-pointer bg-transparent border border-slate-700"
-                    />
-                  )}
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={useHijab}
-                    data-testid="avatar-3d-hijab-toggle"
-                    onClick={() => setUseHijab((prev) => !prev)}
-                    className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition-colors cursor-pointer ${
-                      useHijab
-                        ? 'bg-emerald-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {useHijab ? 'HIJAB: ON' : 'HIJAB: OFF'}
-                  </button>
-                </div>
-              </div>
-
-              {/* 3. Hair Style & Hair Color */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label
-                    htmlFor="avatar-3d-hair-style-select"
-                    className="block text-xs font-semibold mb-1"
-                  >
-                    3. Gaya Rambut (Hair Style)
-                  </label>
-                  <select
-                    id="avatar-3d-hair-style-select"
-                    data-testid="avatar-3d-hair-style-select"
-                    value={hairStyle}
-                    onChange={(e) =>
-                      setHairStyle(e.target.value as AvatarHairStyle)
-                    }
-                    className={`w-full px-2.5 py-1.5 rounded-lg text-xs border ${
-                      isDark
-                        ? 'bg-slate-950 border-slate-700 text-white'
-                        : 'bg-slate-50 border-slate-300 text-slate-900'
-                    }`}
-                  >
-                    <option value="short">Short Crop (Pendek Rapi)</option>
-                    <option value="parted">Side Parted (Belah Samping)</option>
-                    <option value="long">Long Flowing (Panjang)</option>
-                    <option value="bun">Top Bun (Cepol Rapi)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold mb-1">
-                    4. Warna Rambut (Hair Color)
-                  </label>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {HAIR_COLOR_PRESETS.map((hc) => (
+              {/* Right 7 Cols: Spacious Controls (Gender, Outfit, Shirt Color, Hijab / Hair Style & Color) */}
+              <div className="lg:col-span-7 space-y-4 flex flex-col justify-between">
+                {/* 1. Gender Avatar (Pria / Wanita) & 2. Model Baju (Outfit Type) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold mb-1.5">
+                      1. Gender Avatar
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
                       <button
-                        key={hc.hex}
                         type="button"
-                        title={hc.label}
-                        onClick={() => setHairColor(hc.hex)}
-                        className={`w-5 h-5 rounded-md border cursor-pointer ${
-                          hairColor.toLowerCase() === hc.hex.toLowerCase()
-                            ? 'ring-2 ring-[#00B4D8] border-white'
-                            : 'border-slate-700'
+                        data-testid="avatar-3d-gender-male"
+                        onClick={() => handleSelectGender('male')}
+                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                          gender === 'male'
+                            ? 'bg-[#0277BD] text-white border-[#00B4D8] shadow-md'
+                            : isDark
+                            ? 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                            : 'bg-slate-50 border-slate-300 text-slate-700 hover:border-slate-400'
                         }`}
-                        style={{ backgroundColor: hc.hex }}
+                      >
+                        <User className="w-3.5 h-3.5" />
+                        <span>Pria</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        data-testid="avatar-3d-gender-female"
+                        onClick={() => handleSelectGender('female')}
+                        className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                          gender === 'female'
+                            ? 'bg-[#0277BD] text-white border-[#00B4D8] shadow-md'
+                            : isDark
+                            ? 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                            : 'bg-slate-50 border-slate-300 text-slate-700 hover:border-slate-400'
+                        }`}
+                      >
+                        <User className="w-3.5 h-3.5" />
+                        <span>Wanita</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="avatar-3d-outfit-type-select"
+                      className="block text-xs font-semibold mb-1.5"
+                    >
+                      2. Model Baju (Outfit Type)
+                    </label>
+                    <select
+                      id="avatar-3d-outfit-type-select"
+                      data-testid="avatar-3d-outfit-type-select"
+                      value={outfitType}
+                      onChange={(e) =>
+                        setOutfitType(e.target.value as AvatarOutfitType)
+                      }
+                      className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold border ${
+                        isDark
+                          ? 'bg-slate-950 border-slate-700 text-white'
+                          : 'bg-slate-50 border-slate-300 text-slate-900'
+                      }`}
+                    >
+                      <option value="short_sleeve">Kaos Lengan Pendek</option>
+                      <option value="formal_shirt">
+                        Kemeja Formal (Kerah &amp; Kancing)
+                      </option>
+                      <option value="long_sleeve">Lengan Panjang</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* 3. Warna Baju 3D (Shirt Color) */}
+                <div>
+                  <label className="block text-xs font-semibold mb-1.5">
+                    3. Warna Baju 3D (Shirt Color):{' '}
+                    <span className="font-mono text-[#00B4D8]">{shirtColor}</span>
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {SHIRT_COLOR_PRESETS.map((preset) => (
+                      <button
+                        key={preset.hex}
+                        type="button"
+                        title={preset.label}
+                        data-testid={`shirt-color-preset-${preset.hex}`}
+                        onClick={() => setShirtColor(preset.hex)}
+                        className={`w-7 h-7 rounded-lg border transition-transform cursor-pointer ${
+                          shirtColor.toLowerCase() === preset.hex.toLowerCase()
+                            ? 'ring-2 ring-white scale-110 border-white'
+                            : 'border-slate-700 opacity-85 hover:opacity-100'
+                        }`}
+                        style={{ backgroundColor: preset.hex }}
                       />
                     ))}
                     <input
                       type="color"
-                      aria-label="Warna Rambut Kustom"
-                      data-testid="avatar-3d-hair-color-input"
-                      value={hairColor}
-                      onChange={(e) => setHairColor(e.target.value)}
-                      className="w-6 h-5 rounded cursor-pointer bg-transparent border border-slate-700"
+                      aria-label="Pilih Shirt Color Kustom"
+                      data-testid="avatar-3d-shirt-color-input"
+                      value={shirtColor}
+                      onChange={(e) => setShirtColor(e.target.value)}
+                      className="w-8 h-7 rounded-lg cursor-pointer bg-transparent border border-slate-700"
                     />
                   </div>
                 </div>
+
+                {/* 4. Hijab 3D Toggle (ONLY shown when gender === 'female') */}
+                {gender === 'female' && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                    <p className="text-xs font-bold text-white">
+                      4. Gunakan Hijab 3D
+                    </p>
+                    <div className="flex items-center gap-2.5">
+                      {useHijab && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] text-slate-300 font-mono">
+                            Warna Hijab:
+                          </span>
+                          <input
+                            type="color"
+                            aria-label="Warna Hijab 3D"
+                            value={hijabColor}
+                            onChange={(e) => setHijabColor(e.target.value)}
+                            title="Pilih Warna Hijab"
+                            className="w-7 h-7 rounded-lg cursor-pointer bg-transparent border border-slate-700"
+                          />
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={useHijab}
+                        data-testid="avatar-3d-hijab-toggle"
+                        onClick={() => setUseHijab((prev) => !prev)}
+                        className={`px-3.5 py-1.5 rounded-xl text-xs font-mono font-bold transition-colors cursor-pointer ${
+                          useHijab
+                            ? 'bg-emerald-500 text-slate-950'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}
+                      >
+                        {useHijab ? 'HIJAB: ON' : 'HIJAB: OFF'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 5. Hair Style & Hair Color (Shown for Pria, or Wanita when Hijab is OFF) */}
+                {(gender === 'male' || !useHijab) && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label
+                        htmlFor="avatar-3d-hair-style-select"
+                        className="block text-xs font-semibold mb-1.5"
+                      >
+                        {gender === 'male'
+                          ? '4. Gaya Rambut Pria (Hair Style)'
+                          : '5. Gaya Rambut Wanita (Hair Style)'}
+                      </label>
+                      <select
+                        id="avatar-3d-hair-style-select"
+                        data-testid="avatar-3d-hair-style-select"
+                        value={hairStyle}
+                        onChange={(e) =>
+                          setHairStyle(e.target.value as AvatarHairStyle)
+                        }
+                        className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold border ${
+                          isDark
+                            ? 'bg-slate-950 border-slate-700 text-white'
+                            : 'bg-slate-50 border-slate-300 text-slate-900'
+                        }`}
+                      >
+                        {(gender === 'male'
+                          ? MALE_HAIR_OPTIONS
+                          : FEMALE_HAIR_OPTIONS
+                        ).map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold mb-1.5">
+                        {gender === 'male'
+                          ? '5. Warna Rambut (Hair Color)'
+                          : '6. Warna Rambut (Hair Color)'}
+                      </label>
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        {HAIR_COLOR_PRESETS.map((hc) => (
+                          <button
+                            key={hc.hex}
+                            type="button"
+                            title={hc.label}
+                            onClick={() => setHairColor(hc.hex)}
+                            className={`w-6 h-6 rounded-lg border cursor-pointer ${
+                              hairColor.toLowerCase() === hc.hex.toLowerCase()
+                                ? 'ring-2 ring-[#00B4D8] border-white scale-110'
+                                : 'border-slate-700'
+                            }`}
+                            style={{ backgroundColor: hc.hex }}
+                          />
+                        ))}
+                        <input
+                          type="color"
+                          aria-label="Warna Rambut Kustom"
+                          data-testid="avatar-3d-hair-color-input"
+                          value={hairColor}
+                          onChange={(e) => setHairColor(e.target.value)}
+                          className="w-7 h-6 rounded-lg cursor-pointer bg-transparent border border-slate-700"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

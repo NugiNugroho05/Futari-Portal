@@ -18,6 +18,7 @@ import {
 import {
   FleetVehicleItem,
   FleetVehicleStatus,
+  BranchType,
   StaffMemberRecord,
   CalendarEventItem,
   SEED_FLEET_VEHICLES_FIXTURE,
@@ -36,7 +37,7 @@ interface FleetManagementTabProps {
     model: string;
     licensePlate: string;
     status: FleetVehicleStatus;
-    branch?: 'JKT' | 'Bandung';
+    branch?: BranchType;
     notes?: string;
   }) => void;
   onUpdateVehicle: (
@@ -45,7 +46,7 @@ interface FleetManagementTabProps {
       model?: string;
       licensePlate?: string;
       status?: FleetVehicleStatus;
-      branch?: 'JKT' | 'Bandung';
+      branch?: BranchType;
       notes?: string;
     }
   ) => void;
@@ -114,7 +115,7 @@ export const FleetManagementTab: React.FC<FleetManagementTabProps> = ({
   const [modelInput, setModelInput] = useState<string>('');
   const [licensePlateInput, setLicensePlateInput] = useState<string>('');
   const [statusInput, setStatusInput] = useState<FleetVehicleStatus>('Tersedia');
-  const [branchInput, setBranchInput] = useState<'JKT' | 'Bandung'>('JKT');
+  const [branchInput, setBranchInput] = useState<BranchType>('JKT');
   const [notesInput, setNotesInput] = useState<string>('');
   const [vehicleFormError, setVehicleFormError] = useState<string>('');
 
