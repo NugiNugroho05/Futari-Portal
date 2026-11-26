@@ -5796,3 +5796,143 @@ export function syncAttendanceLogsWithLeave(
   return updatedLogs.sort((a, b) => a.date.localeCompare(b.date));
 }
 
+
+// ---------------------------------------------------------------------------
+// 3D Virtual Office — Cafeteria seating capacity & Smoking Lounge slot layout
+// (pure & deterministic so every browser computes identical slot assignments)
+// ---------------------------------------------------------------------------
+
+export const DINING_HALL_LAYOUT = {
+  centerX: 17.5,
+  width: 8.8,
+  minZ: -1.6,
+  maxZ: 10.9,
+  laneX: 17.5,
+  entranceZ: 9.75,
+  rowZ: [7.85, 4.55, 1.25],
+  tables: [
+    { tx: 15.35, tz: 7.85, row: 0 },
+    { tx: 19.65, tz: 7.85, row: 0 },
+    { tx: 15.35, tz: 4.55, row: 1 },
+    { tx: 19.65, tz: 4.55, row: 1 },
+    { tx: 15.35, tz: 1.25, row: 2 },
+  ],
+  southAisleZ: [9.45, 6.2, 2.9],
+  northAisleZ: [6.2, 2.9, -0.2],
+  seatOffsets: [-0.92, 0, 0.92],
+  seatsPerTable: 6,
+} as const;
+
+/** 5 communal tables × 6 chairs = 30 dining seats. */
+export const DINING_SEAT_CAPACITY =
+  DINING_HALL_LAYOUT.tables.length * DINING_HALL_LAYOUT.seatsPerTable;
+
+/** Row index (0 = nearest the entrance, 2 = farthest) that a seat/aisle z coordinate belongs to. */
+export function getDiningRowForZ(z: number): number {
+  if (z >= 6.0) return 0;
+  if (z >= 2.5) return 1;
+  return 2;
+}
+
+/** Unique dining chair for a slot index (wraps only beyond 30 simultaneous diners). */
+export function getDiningSeatSpecBySlot(slot: number): {
+  seatX: number;
+  seatZ: number;
+  facingAngle: number;
+  tableIdx: number;
+  row: number;
+  sideZ: 1 | -1;
+} {
+  const cap = DINING_SEAT_CAPACITY;
+  const idx = ((Math.floor(slot) % cap) + cap) % cap;
+  const tableIdx = Math.floor(idx / DINING_HALL_LAYOUT.seatsPerTable);
+  const within = idx % DINING_HALL_LAYOUT.seatsPerTable;
+  const table = DINING_HALL_LAYOUT.tables[tableIdx];
+  const colIdx = Math.floor(within / 2);
+  const sideZ: 1 | -1 = within % 2 === 0 ? 1 : -1;
+  return {
+    seatX: table.tx + DINING_HALL_LAYOUT.seatOffsets[colIdx],
+    seatZ: table.tz + sideZ * 0.78,
+    facingAngle: sideZ === 1 ? Math.PI : 0,
+    tableIdx,
+    row: table.row,
+    sideZ,
+  };
+}
+
+export interface SmokingLoungeSpec {
+  walkZ: number;
+  x0: number;
+  dx: number;
+  rowsZ: [number, number];
+  laneOffset: number;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+/** 2 rows × 5 columns = 10 standing slots (Jakarta HQ, south of the exit-door walkway). */
+export const SMOKING_LOUNGE_JKT: SmokingLoungeSpec = {
+  walkZ: 10.55,
+  x0: 5.8,
+  dx: 1.5,
+  rowsZ: [12.5, 14.1],
+  laneOffset: 0.75,
+  minX: 4.5,
+  maxX: 13.1,
+  minZ: 11.6,
+  maxZ: 15.4,
+};
+
+/** 2 rows × 5 columns = 10 standing slots (Gedung Jawa patio). */
+export const SMOKING_LOUNGE_JAWA: SmokingLoungeSpec = {
+  walkZ: 9.75,
+  x0: 28.0,
+  dx: 1.4,
+  rowsZ: [11.7, 13.3],
+  laneOffset: 0.7,
+  minX: 26.7,
+  maxX: 35.0,
+  minZ: 10.8,
+  maxZ: 14.6,
+};
+
+export const SMOKING_SLOT_CAPACITY = 10;
+
+export function getSmokingLoungeSpec(isBandung: boolean): SmokingLoungeSpec {
+  return isBandung ? SMOKING_LOUNGE_JAWA : SMOKING_LOUNGE_JKT;
+}
+
+export function getSmokingSlotSpec(
+  slot: number,
+  isBandung: boolean
+): { x: number; z: number; row: number; col: number } {
+  const spec = getSmokingLoungeSpec(isBandung);
+  const idx =
+    ((Math.floor(slot) % SMOKING_SLOT_CAPACITY) + SMOKING_SLOT_CAPACITY) %
+    SMOKING_SLOT_CAPACITY;
+  const row = Math.floor(idx / 5);
+  const col = idx % 5;
+  return { x: spec.x0 + col * spec.dx, z: spec.rowsZ[row], row, col };
+}
+
+export function isPointInSmokingLounge(
+  x: number,
+  z: number,
+  isBandung: boolean
+): boolean {
+  const s = getSmokingLoungeSpec(isBandung);
+  return x >= s.minX && x <= s.maxX && z >= s.minZ && z <= s.maxZ;
+}
+
+/**
+ * Deterministic slot ranking: sorts ids with a stable comparator so every browser derives the
+ * same slot index for the same set of people currently on break.
+ */
+export function rankBreakSlots(ids: string[]): Map<string, number> {
+  const sorted = [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const ranks = new Map<string, number>();
+  sorted.forEach((id, i) => ranks.set(id, i));
+  return ranks;
+}

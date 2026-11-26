@@ -30,6 +30,15 @@ import {
   decodePersonnelAvatarUrlAndMetadata,
   SupabasePersonnelRow,
   resolveIndividualBreakStatus,
+  DINING_HALL_LAYOUT,
+  DINING_SEAT_CAPACITY,
+  SMOKING_SLOT_CAPACITY,
+  getDiningRowForZ,
+  getDiningSeatSpecBySlot,
+  getSmokingLoungeSpec,
+  getSmokingSlotSpec,
+  isPointInSmokingLounge,
+  rankBreakSlots,
 } from '../utils/futariLogic';
 import { supabase } from '../supabaseClient';
 import {
@@ -639,9 +648,9 @@ function createPocketMattressBedGroup(): THREE.Group {
 function createDiningHallZoneGroup(isDark: boolean): THREE.Group {
   const group = new THREE.Group();
   const centerX = 17.5;
-  const centerZ = 7.4;
-  const width = 8.8;
-  const depth = 7.0;
+  const centerZ = (DINING_HALL_LAYOUT.minZ + DINING_HALL_LAYOUT.maxZ) / 2;
+  const width = DINING_HALL_LAYOUT.width;
+  const depth = DINING_HALL_LAYOUT.maxZ - DINING_HALL_LAYOUT.minZ;
 
   // 1. Dining Hall Raised Platform & Warm Terracotta/Wood Cafeteria Flooring
   const platformMat = new THREE.MeshStandardMaterial({
@@ -820,10 +829,9 @@ function createDiningHallZoneGroup(isDark: boolean): THREE.Group {
     roughness: 0.25,
   });
 
-  const tableCenters: Array<{ tx: number; tz: number }> = [
-    { tx: 15.35, tz: 7.85 },
-    { tx: 19.65, tz: 7.85 },
-  ];
+  // 5 long communal tables (2-2-1 layout) x 6 chairs = 30 dining seats
+  const tableCenters: Array<{ tx: number; tz: number }> =
+    DINING_HALL_LAYOUT.tables.map((tbl) => ({ tx: tbl.tx, tz: tbl.tz }));
 
   tableCenters.forEach(({ tx, tz }) => {
     // Communal table top (2.9m wide x 1.24m deep, calibrated to seated avatar height)
@@ -920,6 +928,10 @@ function createDiningHallZoneGroup(isDark: boolean): THREE.Group {
     [centerX + width / 2 - 0.5, centerZ - depth / 2 + 0.55],
     [centerX - width / 2 + 0.5, centerZ + depth / 2 - 0.45],
     [centerX + width / 2 - 0.5, centerZ + depth / 2 - 0.45],
+    [19.65, 1.25],
+    [19.65, 2.45],
+    [centerX - width / 2 + 0.5, 4.6],
+    [centerX + width / 2 - 0.5, 4.6],
   ].forEach(([px, pz]) => {
     const plant = createIndoorPlantGroup('#f59e0b');
     plant.position.set(px, 0.03, pz);
@@ -945,7 +957,7 @@ function createDiningHallZoneGroup(isDark: boolean): THREE.Group {
 }
 
 /**
- * Returns one of 12 pre-assigned communal dining table seats inside RUANG MAKAN
+ * Returns a communal dining chair (30 total: 5 tables x 6 chairs) inside RUANG MAKAN
  * along with the facing angle (`rotationY`) so the avatar sits facing their plate.
  */
 function getAssignedDiningSeatSpec(seedIndex: number): {
@@ -953,20 +965,272 @@ function getAssignedDiningSeatSpec(seedIndex: number): {
   seatZ: number;
   facingAngle: number;
 } {
-  const tableXs = [15.35, 19.65];
-  const seatOffsets = [-0.92, 0, 0.92];
-  const tableIdx = seedIndex % 2;
-  const sideIdx = Math.floor(seedIndex / 2) % 2; // 0 = South side (+Z facing North PI), 1 = North side (-Z facing South 0)
-  const colIdx = Math.floor(seedIndex / 4) % 3;
-
-  const tx = tableXs[tableIdx];
-  const tz = 7.85;
-  const sideZ = sideIdx === 0 ? 1 : -1;
+  const spec = getDiningSeatSpecBySlot(seedIndex);
   return {
-    seatX: tx + seatOffsets[colIdx],
-    seatZ: tz + sideZ * 0.78,
-    facingAngle: sideZ === 1 ? Math.PI : 0,
+    seatX: spec.seatX,
+    seatZ: spec.seatZ,
+    facingAngle: spec.facingAngle,
   };
+}
+
+/**
+ * Flat chevron arrow (points toward +X when laid on the floor) used for walkway direction markings.
+ */
+function createFlatArrowGeometry(): THREE.ShapeGeometry {
+  const s = new THREE.Shape();
+  s.moveTo(-0.3, -0.26);
+  s.lineTo(0.04, -0.26);
+  s.lineTo(0.34, 0);
+  s.lineTo(0.04, 0.26);
+  s.lineTo(-0.3, 0.26);
+  s.lineTo(0.0, 0);
+  s.closePath();
+  return new THREE.ShapeGeometry(s);
+}
+
+/**
+ * Builds the connecting walkways + floor direction arrows + signposts toward RUANG MAKAN / CAFETERIA:
+ *  - Jakarta HQ Exit Door (4.2, 9.8) -> walkway along Z = 10.55 -> Ruang Makan west entrance (X = 13.1)
+ *  - Gedung Jawa doors -> walkway along Z = 9.75 -> Ruang Makan east entrance (X = 22.0)
+ */
+function createWalkwayGroup(isDark: boolean): THREE.Group {
+  const group = new THREE.Group();
+  const slabMat = new THREE.MeshStandardMaterial({
+    color: isDark ? 0x334155 : 0x94a3b8,
+    roughness: 0.72,
+    metalness: 0.1,
+  });
+  const curbMat = new THREE.MeshStandardMaterial({
+    color: 0xf1f5f9,
+    roughness: 0.5,
+  });
+  const arrowMat = new THREE.MeshBasicMaterial({
+    color: 0xf59e0b,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.95,
+  });
+  const arrowGeo = createFlatArrowGeometry();
+  const poleMat = new THREE.MeshStandardMaterial({
+    color: 0x475569,
+    roughness: 0.4,
+    metalness: 0.6,
+  });
+
+  const addSlab = (x1: number, z1: number, x2: number, z2: number, w: number) => {
+    const horizontal = Math.abs(x2 - x1) >= Math.abs(z2 - z1);
+    const cx = (x1 + x2) / 2;
+    const cz = (z1 + z2) / 2;
+    const len = horizontal ? Math.abs(x2 - x1) : Math.abs(z2 - z1);
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(horizontal ? len : w, 0.08, horizontal ? w : len),
+      slabMat
+    );
+    slab.position.set(cx, 0, cz);
+    slab.receiveShadow = true;
+    group.add(slab);
+    ([-1, 1] as const).forEach((side) => {
+      const curb = new THREE.Mesh(
+        new THREE.BoxGeometry(horizontal ? len : 0.07, 0.05, horizontal ? 0.07 : len),
+        curbMat
+      );
+      curb.position.set(
+        horizontal ? cx : cx + (side * w) / 2,
+        0.045,
+        horizontal ? cz + (side * w) / 2 : cz
+      );
+      group.add(curb);
+    });
+  };
+
+  const addArrows = (
+    x1: number,
+    z1: number,
+    x2: number,
+    z2: number,
+    spacing: number
+  ) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const count = Math.max(1, Math.floor(len / spacing));
+    const heading = -Math.atan2(z2 - z1, x2 - x1);
+    for (let k = 0; k <= count; k++) {
+      const t = count === 0 ? 0 : k / count;
+      const arrow = new THREE.Mesh(arrowGeo, arrowMat);
+      arrow.rotation.order = 'YXZ';
+      arrow.rotation.set(-Math.PI / 2, heading, 0);
+      arrow.position.set(x1 + (x2 - x1) * t, 0.05, z1 + (z2 - z1) * t);
+      group.add(arrow);
+    }
+  };
+
+  const addSignPost = (
+    x: number,
+    z: number,
+    title: string,
+    subtitle: string,
+    color: string
+  ) => {
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.06, 1.9, 12),
+      poleMat
+    );
+    pole.position.set(x, 0.95, z);
+    pole.castShadow = true;
+    group.add(pole);
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.2, 0.24, 0.06, 16),
+      poleMat
+    );
+    base.position.set(x, 0.03, z);
+    group.add(base);
+    const board = createArchitecturalLabelSprite(title, subtitle, color, 2.9, 0.78);
+    board.position.set(x, 2.25, z);
+    group.add(board);
+  };
+
+  // --- Jakarta HQ: Exit Door -> Ruang Makan ---
+  addSlab(3.5, 10.55, 13.1, 10.55, 1.6);
+  addArrows(5.0, 10.55, 12.4, 10.55, 1.4);
+  addSignPost(7.2, 9.55, '→ RUANG MAKAN / CAFETERIA', 'Ikuti jalur koridor', '#f59e0b');
+  addSignPost(12.3, 9.55, 'RUANG MAKAN →', 'Pintu masuk Cafeteria', '#f59e0b');
+  addSignPost(5.0, 11.5, '↓ SMOKING LOUNGE', 'Teras Exit Door HQ', '#94a3b8');
+
+  // --- Gedung Jawa: Entrance / Exit doors -> Ruang Makan ---
+  addSlab(22.0, 9.75, 34.2, 9.75, 1.6);
+  addSlab(30.2, 5.4, 30.2, 9.75, 1.6);
+  addSlab(25.8, 5.4, 25.8, 9.75, 1.6);
+  addArrows(29.6, 9.75, 22.8, 9.75, 1.4);
+  addArrows(30.2, 5.9, 30.2, 9.2, 1.3);
+  addArrows(25.8, 5.9, 25.8, 9.2, 1.3);
+  addSignPost(27.9, 8.85, '← RUANG MAKAN / CAFETERIA', 'Ikuti jalur koridor', '#f59e0b');
+  addSignPost(32.4, 10.6, '↓ SMOKING LOUNGE', 'Teras Gedung Jawa', '#94a3b8');
+
+  return group;
+}
+
+/**
+ * Builds an outdoor Smoking Lounge / Patio with 10 evenly spaced standing slots (2 rows x 5),
+ * standing ashtray tables and potted plants.
+ */
+function createSmokingLoungeGroup(isDark: boolean, isBandung: boolean): THREE.Group {
+  const group = new THREE.Group();
+  const spec = getSmokingLoungeSpec(isBandung);
+  const w = spec.maxX - spec.minX;
+  const d = spec.maxZ - spec.minZ;
+  const cx = (spec.minX + spec.maxX) / 2;
+  const cz = (spec.minZ + spec.maxZ) / 2;
+
+  const deck = new THREE.Mesh(
+    new THREE.BoxGeometry(w, 0.12, d),
+    new THREE.MeshStandardMaterial({
+      color: isDark ? 0x1e293b : 0x334155,
+      roughness: 0.7,
+      metalness: 0.15,
+    })
+  );
+  deck.position.set(cx, -0.06, cz);
+  deck.receiveShadow = true;
+  group.add(deck);
+
+  const woodDeck = new THREE.Mesh(
+    new THREE.BoxGeometry(w - 0.3, 0.03, d - 0.3),
+    new THREE.MeshStandardMaterial({
+      color: isDark ? 0x44403c : 0x57534e,
+      roughness: 0.7,
+    })
+  );
+  woodDeck.position.set(cx, 0.015, cz);
+  woodDeck.receiveShadow = true;
+  group.add(woodDeck);
+
+  // 10 slot markers
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: 0xf59e0b,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+  });
+  const ringGeo = new THREE.RingGeometry(0.2, 0.3, 28);
+  for (let slot = 0; slot < SMOKING_SLOT_CAPACITY; slot++) {
+    const p = getSmokingSlotSpec(slot, isBandung);
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(p.x, 0.04, p.z);
+    group.add(ring);
+  }
+
+  const metalMat = new THREE.MeshStandardMaterial({
+    color: 0x475569,
+    roughness: 0.35,
+    metalness: 0.6,
+  });
+  const topMat = new THREE.MeshStandardMaterial({
+    color: 0xe2e8f0,
+    roughness: 0.3,
+    metalness: 0.3,
+  });
+  const emberMat = new THREE.MeshStandardMaterial({
+    color: 0xef4444,
+    emissive: 0xef4444,
+    emissiveIntensity: 0.6,
+  });
+
+  const addStandingTable = (x: number, z: number) => {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 1.0, 12), metalMat);
+    pole.position.set(x, 0.5, z);
+    group.add(pole);
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.28, 0.04, 18), metalMat);
+    base.position.set(x, 0.02, z);
+    group.add(base);
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.05, 20), topMat);
+    top.position.set(x, 1.02, z);
+    top.castShadow = true;
+    group.add(top);
+    const ashtray = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.09, 0.03, 14), metalMat);
+    ashtray.position.set(x, 1.065, z);
+    group.add(ashtray);
+    const ember = new THREE.Mesh(new THREE.SphereGeometry(0.018, 8, 8), emberMat);
+    ember.position.set(x + 0.04, 1.09, z);
+    group.add(ember);
+  };
+  addStandingTable(spec.minX + 0.5, cz);
+  addStandingTable(spec.maxX - 0.5, cz);
+
+  // Standing ashtray pillars behind the back row (clear of the gap lanes)
+  for (let k = 0; k < 4; k++) {
+    const ax = spec.x0 + spec.dx / 2 + k * spec.dx;
+    const az = spec.maxZ - 0.35;
+    const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 0.62, 14), metalMat);
+    stand.position.set(ax, 0.31, az);
+    group.add(stand);
+    const dish = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.11, 0.05, 16), topMat);
+    dish.position.set(ax, 0.65, az);
+    group.add(dish);
+  }
+
+  // Potted plants at corners
+  [
+    [spec.minX + 0.4, spec.minZ + 0.4],
+    [spec.maxX - 0.4, spec.minZ + 0.4],
+    [spec.minX + 0.4, spec.maxZ - 0.4],
+    [spec.maxX - 0.4, spec.maxZ - 0.4],
+  ].forEach(([px, pz]) => {
+    const plant = createIndoorPlantGroup('#22c55e');
+    plant.position.set(px, 0.03, pz);
+    group.add(plant);
+  });
+
+  const label = createArchitecturalLabelSprite(
+    'SMOKING LOUNGE',
+    isBandung ? 'Teras Gedung Jawa · 10 slot' : 'Teras Exit Door HQ · 10 slot',
+    '#94a3b8',
+    3.6,
+    0.9
+  );
+  label.position.set(cx, 2.5, spec.maxZ - 0.2);
+  group.add(label);
+
+  return group;
 }
 
 /**
@@ -1015,34 +1279,60 @@ export function buildCorridorWaypoints(
     }
   };
 
+  // ---- Cafeteria (RUANG MAKAN): 5 communal tables in 3 rows, single N-S lane at X = 17.5 ----
+  const DH = DINING_HALL_LAYOUT;
   const isInDiningHall = (x: number, z: number) =>
-    x >= 13.0 && x <= 22.0 && z >= 3.8 && z <= 11.0;
+    x >= 13.0 && x <= 22.0 && z >= -1.7 && z <= 11.0;
+
+  const diningAisleZ = (z: number): number => {
+    const row = getDiningRowForZ(z);
+    return z > DH.rowZ[row] ? DH.southAisleZ[row] : DH.northAisleZ[row];
+  };
 
   const appendLeaveDiningHall = (sx: number, sz: number) => {
-    if (sz < 7.85) {
-      pushUnique(sx, 6.25);
-      pushUnique(17.5, 6.25);
-    } else {
-      pushUnique(sx, 9.45);
-    }
-    pushUnique(17.5, 9.75);
+    const aisleZ = diningAisleZ(sz);
+    pushUnique(sx, aisleZ);
+    pushUnique(DH.laneX, aisleZ);
+    pushUnique(DH.laneX, DH.entranceZ);
   };
 
   const appendEnterDiningHall = (ex: number, ez: number) => {
-    pushUnique(17.5, 9.75);
-    if (ez < 7.85) {
-      pushUnique(17.5, 6.25);
-      pushUnique(ex, 6.25);
-    } else {
-      pushUnique(ex, 9.45);
-    }
+    const aisleZ = diningAisleZ(ez);
+    pushUnique(DH.laneX, DH.entranceZ);
+    pushUnique(DH.laneX, aisleZ);
+    pushUnique(ex, aisleZ);
+    pushUnique(ex, ez);
+  };
+
+  // ---- Smoking Lounge (2 rows x 5 slots): back-row slots are reached through the gap lane between columns ----
+  const lounge = getSmokingLoungeSpec(isBandung);
+  const isInLounge = (x: number, z: number) =>
+    isPointInSmokingLounge(x, z, isBandung);
+  const loungeRowOf = (z: number) =>
+    z > (lounge.rowsZ[0] + lounge.rowsZ[1]) / 2 ? 1 : 0;
+
+  const appendLeaveLounge = (sx: number, sz: number) => {
+    const row = loungeRowOf(sz);
+    const laneX = row === 1 ? sx - lounge.laneOffset : sx;
+    if (row === 1) pushUnique(laneX, sz);
+    pushUnique(laneX, lounge.walkZ);
+  };
+
+  const appendEnterLounge = (ex: number, ez: number) => {
+    const row = loungeRowOf(ez);
+    const laneX = row === 1 ? ex - lounge.laneOffset : ex;
+    pushUnique(laneX, lounge.walkZ);
+    pushUnique(laneX, ez);
     pushUnique(ex, ez);
   };
 
   if (isBandung) {
     // Gedung Jawa interior bounds: X in [22.3, 33.7], Z in [-5.1, 4.85]
     // Entrance Door at (25.8, 5.2), Exit Door at (30.2, 5.2), indoor south aisle Z = 3.65
+    // Connecting walkway: Exit Door (30.2) -> Z = 9.75 -> West to Ruang Makan (X = 22.5)
     const jawaDoorThresholdZ = 3.65;
+    const WALK_Z = 9.75;
+    const HALL_EAST_X = 22.5;
     const isInsideJawa = (x: number, z: number) =>
       x >= 22.3 && x <= 33.7 && z >= -5.1 && z <= 4.85;
 
@@ -1050,9 +1340,19 @@ export function buildCorridorWaypoints(
     const endOutside = !isInsideJawa(endX, endZ);
 
     if (startOutside && !endOutside) {
+      if (isInLounge(startX, startZ)) {
+        appendLeaveLounge(startX, startZ);
+        pushUnique(30.2, WALK_Z);
+        pushUnique(30.2, 5.85);
+        pushUnique(30.2, jawaDoorThresholdZ);
+        pushUnique(endX, jawaDoorThresholdZ);
+        pushUnique(endX, endZ);
+        return pts;
+      }
       if (isInDiningHall(startX, startZ)) {
         appendLeaveDiningHall(startX, startZ);
-        pushUnique(22.5, 9.75);
+        pushUnique(HALL_EAST_X, WALK_Z);
+        pushUnique(25.8, WALK_Z);
         pushUnique(25.8, 6.1);
       } else if (startZ > 5.3) {
         const doorX = startX > 28.0 ? 30.2 : 25.8;
@@ -1073,8 +1373,14 @@ export function buildCorridorWaypoints(
       pushUnique(30.2, jawaDoorThresholdZ);
       pushUnique(30.2, 5.95);
       if (isInDiningHall(endX, endZ)) {
-        pushUnique(22.5, 9.75);
+        pushUnique(30.2, WALK_Z);
+        pushUnique(HALL_EAST_X, WALK_Z);
         appendEnterDiningHall(endX, endZ);
+        return pts;
+      }
+      if (isInLounge(endX, endZ)) {
+        pushUnique(30.2, WALK_Z);
+        appendEnterLounge(endX, endZ);
         return pts;
       }
       pushUnique(endX, endZ);
@@ -1082,14 +1388,23 @@ export function buildCorridorWaypoints(
     }
 
     if (startOutside && endOutside) {
-      if (isInDiningHall(startX, startZ) && !isInDiningHall(endX, endZ)) {
+      const startInHall = isInDiningHall(startX, startZ);
+      if (isInLounge(startX, startZ)) {
+        appendLeaveLounge(startX, startZ);
+      } else if (startInHall) {
         appendLeaveDiningHall(startX, startZ);
-        pushUnique(22.5, 9.75);
-      } else if (!isInDiningHall(startX, startZ) && isInDiningHall(endX, endZ)) {
-        pushUnique(22.5, 9.75);
+      }
+      if (isInDiningHall(endX, endZ)) {
+        pushUnique(HALL_EAST_X, WALK_Z);
         appendEnterDiningHall(endX, endZ);
         return pts;
       }
+      if (isInLounge(endX, endZ)) {
+        if (startInHall) pushUnique(HALL_EAST_X, WALK_Z);
+        appendEnterLounge(endX, endZ);
+        return pts;
+      }
+      if (startInHall) pushUnique(HALL_EAST_X, WALK_Z);
       pushUnique(endX, endZ);
       return pts;
     }
@@ -1103,8 +1418,20 @@ export function buildCorridorWaypoints(
 
   // Jakarta HQ interior bounds: X in [-12.1, +12.1], Z in [-9.4, +9.3]
   // Entrance Door (-4.2, 9.8), Exit Door (+4.2, 9.8)
+  // Connecting walkway: Exit Door (4.2) -> Z = 10.55 -> East to Ruang Makan west entrance (X = 13.0)
   const SPINE_X = -3.85;
   const LOBBY_Z = 8.35;
+  const WALK_Z = 10.55;
+  const HALL_WEST_X = 13.0;
+
+  const walkwayToHall = () => {
+    pushUnique(HALL_WEST_X, WALK_Z);
+    pushUnique(DH.laneX, WALK_Z);
+  };
+  const hallToWalkway = () => {
+    pushUnique(DH.laneX, WALK_Z);
+    pushUnique(HALL_WEST_X, WALK_Z);
+  };
 
   const getRoomAisleZ = (z: number): number => {
     if (z < -2.4) return -2.75;
@@ -1119,12 +1446,16 @@ export function buildCorridorWaypoints(
   const endOutside = !isInsideJkt(endX, endZ);
 
   if (startOutside && !endOutside) {
-    // Entering Jakarta HQ from Entrance/Exit Door, Smoking Patio, or Ruang Makan
+    // Entering Jakarta HQ from Entrance/Exit Door, Smoking Lounge, or Ruang Makan
     const targetAisleZ = getRoomAisleZ(endZ);
-    if (isInDiningHall(startX, startZ)) {
+    if (isInLounge(startX, startZ)) {
+      appendLeaveLounge(startX, startZ);
+      pushUnique(4.2, WALK_Z);
+      pushUnique(4.2, LOBBY_Z);
+    } else if (isInDiningHall(startX, startZ)) {
       appendLeaveDiningHall(startX, startZ);
-      pushUnique(13.0, 10.55);
-      pushUnique(4.2, 10.55);
+      hallToWalkway();
+      pushUnique(4.2, WALK_Z);
       pushUnique(4.2, LOBBY_Z);
     } else {
       const doorX = startX < 0 ? -4.2 : 4.2;
@@ -1143,7 +1474,7 @@ export function buildCorridorWaypoints(
   }
 
   if (!startOutside && endOutside) {
-    // Walking OUT from Desk -> Exit Door (4.2, 9.8) -> Ruang Makan or Outdoor Smoking Area
+    // Walking OUT from Desk -> Exit Door (4.2, 9.8) -> Walkway -> Ruang Makan or Smoking Lounge
     const startAisleZ = getRoomAisleZ(startZ);
     pushUnique(startX, startAisleZ);
     if (Math.abs(startAisleZ - LOBBY_Z) > 0.2) {
@@ -1151,10 +1482,14 @@ export function buildCorridorWaypoints(
       pushUnique(SPINE_X, LOBBY_Z);
     }
     pushUnique(4.2, LOBBY_Z);
-    pushUnique(4.2, 10.55);
+    pushUnique(4.2, WALK_Z);
     if (isInDiningHall(endX, endZ)) {
-      pushUnique(13.0, 10.55);
+      walkwayToHall();
       appendEnterDiningHall(endX, endZ);
+      return pts;
+    }
+    if (isInLounge(endX, endZ)) {
+      appendEnterLounge(endX, endZ);
       return pts;
     }
     pushUnique(endX, endZ);
@@ -1162,13 +1497,21 @@ export function buildCorridorWaypoints(
   }
 
   if (startOutside && endOutside) {
-    // Moving directly between Ruang Makan and Outdoor Smoking Area
-    if (isInDiningHall(startX, startZ) && !isInDiningHall(endX, endZ)) {
+    // Moving directly between Ruang Makan, Walkway and Smoking Lounge
+    const startInHall = isInDiningHall(startX, startZ);
+    if (isInLounge(startX, startZ)) {
+      appendLeaveLounge(startX, startZ);
+    } else if (startInHall) {
       appendLeaveDiningHall(startX, startZ);
-      pushUnique(13.0, 10.55);
-    } else if (!isInDiningHall(startX, startZ) && isInDiningHall(endX, endZ)) {
-      pushUnique(13.0, 10.55);
+      hallToWalkway();
+    }
+    if (isInDiningHall(endX, endZ)) {
+      walkwayToHall();
       appendEnterDiningHall(endX, endZ);
+      return pts;
+    }
+    if (isInLounge(endX, endZ)) {
+      appendEnterLounge(endX, endZ);
       return pts;
     }
     pushUnique(endX, endZ);
@@ -3486,34 +3829,12 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
     const diningHallGroup = createDiningHallZoneGroup(isDark);
     scene.add(diningHallGroup);
 
-    // Outdoor Smoking Patio / Balcony Zones outside Exit Doors (Jakarta HQ & Gedung Jawa)
-    const smokingPatioSpecs = [
-      { x: 6.8, z: 11.15, label: 'SMOKING AREA · JKT' },
-      { x: 31.2, z: 6.45, label: 'SMOKING AREA · JAWA' },
-    ];
-    smokingPatioSpecs.forEach((patio) => {
-      const patioPad = new THREE.Mesh(
-        new THREE.BoxGeometry(3.2, 0.12, 2.0),
-        new THREE.MeshStandardMaterial({
-          color: 0x1e293b,
-          roughness: 0.7,
-          metalness: 0.15,
-        })
-      );
-      patioPad.position.set(patio.x, -0.06, patio.z);
-      scene.add(patioPad);
+    // Connecting walkways (floor arrows + signposts) between both buildings and RUANG MAKAN
+    scene.add(createWalkwayGroup(isDark));
 
-      const ashtrayStand = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.11, 0.14, 0.62, 14),
-        new THREE.MeshStandardMaterial({
-          color: 0x475569,
-          roughness: 0.35,
-          metalness: 0.55,
-        })
-      );
-      ashtrayStand.position.set(patio.x + 1.15, 0.31, patio.z);
-      scene.add(ashtrayStand);
-    });
+    // Smoking Lounge / Patio Areas (10 standing slots each) outside the Exit Doors
+    scene.add(createSmokingLoungeGroup(isDark, false));
+    scene.add(createSmokingLoungeGroup(isDark, true));
 
     // -------------------------------------------------------------------------
     // 4. RENDER MODERN ARCHITECTURAL ROOM ZONES, DIVISION CARPETS, GLASS PARTITIONS & INDOOR PLANTS
@@ -4076,9 +4397,12 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       const seedHash = person.staffId
         .split('')
         .reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
-      const smokeOffset = ((seedHash % 5) - 2) * 0.45;
-      const smokeSpotX = inBandung ? 30.8 + smokeOffset * 0.6 : 6.4 + smokeOffset;
-      const smokeSpotZ = inBandung ? 6.45 : 11.15;
+      const initialSmokeSlot = getSmokingSlotSpec(
+        seedHash % SMOKING_SLOT_CAPACITY,
+        inBandung
+      );
+      const smokeSpotX = initialSmokeSlot.x;
+      const smokeSpotZ = initialSmokeSlot.z;
 
       const jktRooms = VIRTUAL_OFFICE_ROOMS.filter((r) => r.branch === 'JKT');
       const currentRoomIdx = Math.max(
@@ -4770,6 +5094,90 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
           entry.nameSprite.position.z
         );
       });
+
+      // Deterministic unique slot assignment (identical on every browser):
+      //  - Everyone with break_status === 'eating' gets a unique cafeteria chair (ranked by staffId, 30 chairs)
+      //  - Everyone with break_status === 'smoking' gets a unique lounge slot per building (ranked by staffId, 10 slots)
+      {
+        const eaters: AvatarEntry[] = [];
+        const smokersJkt: AvatarEntry[] = [];
+        const smokersJawa: AvatarEntry[] = [];
+        avatarEntriesMap.forEach((entry) => {
+          if (entry.breakStatus === 'eating') eaters.push(entry);
+          else if (entry.breakStatus === 'smoking') {
+            (entry.isBandung ? smokersJawa : smokersJkt).push(entry);
+          }
+        });
+
+        const rebuildWalkIfInFlight = (
+          entry: AvatarEntry,
+          kind: 'eating' | 'smoking',
+          toX: number,
+          toZ: number
+        ) => {
+          if (
+            entry.activeOutdoorBreakKind === kind &&
+            entry.outdoorBreakProgress < 0.999
+          ) {
+            const fromHome = entry.outdoorBreakProgress > 0.03;
+            entry.activeBreakWaypoints = buildCorridorWaypoints(
+              fromHome ? entry.homeX : entry.avatarActorGroup.position.x,
+              fromHome ? entry.homeZ : entry.avatarActorGroup.position.z,
+              toX,
+              toZ,
+              entry.isBandung
+            );
+          }
+        };
+
+        const eaterRanks = rankBreakSlots(eaters.map((e) => e.staffId));
+        eaters.forEach((entry) => {
+          const spec = getDiningSeatSpecBySlot(eaterRanks.get(entry.staffId) ?? 0);
+          if (
+            Math.abs(spec.seatX - entry.diningSeatX) > 0.001 ||
+            Math.abs(spec.seatZ - entry.diningSeatZ) > 0.001
+          ) {
+            entry.diningSeatX = spec.seatX;
+            entry.diningSeatZ = spec.seatZ;
+            entry.diningFacingAngle = spec.facingAngle;
+            entry.eatingToWaypoints = buildCorridorWaypoints(
+              entry.homeX,
+              entry.homeZ,
+              spec.seatX,
+              spec.seatZ,
+              entry.isBandung
+            );
+            entry.eatingReturnWaypoints = [...entry.eatingToWaypoints].reverse();
+            rebuildWalkIfInFlight(entry, 'eating', spec.seatX, spec.seatZ);
+          }
+        });
+
+        [smokersJkt, smokersJawa].forEach((group) => {
+          const ranks = rankBreakSlots(group.map((e) => e.staffId));
+          group.forEach((entry) => {
+            const spec = getSmokingSlotSpec(
+              ranks.get(entry.staffId) ?? 0,
+              entry.isBandung
+            );
+            if (
+              Math.abs(spec.x - entry.smokeSpotX) > 0.001 ||
+              Math.abs(spec.z - entry.smokeSpotZ) > 0.001
+            ) {
+              entry.smokeSpotX = spec.x;
+              entry.smokeSpotZ = spec.z;
+              entry.smokeToWaypoints = buildCorridorWaypoints(
+                entry.homeX,
+                entry.homeZ,
+                spec.x,
+                spec.z,
+                entry.isBandung
+              );
+              entry.smokeReturnWaypoints = [...entry.smokeToWaypoints].reverse();
+              rebuildWalkIfInFlight(entry, 'smoking', spec.x, spec.z);
+            }
+          });
+        });
+      }
 
       avatarEntriesMap.forEach((entry) => {
         const sIdx = entry.syncIndex;

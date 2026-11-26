@@ -109,6 +109,11 @@ import {
   applyActiveAttendanceToStaffList,
   resolveIndividualBreakStatus,
   isMissingBreakStatusColumnError,
+  DINING_SEAT_CAPACITY,
+  SMOKING_SLOT_CAPACITY,
+  getDiningSeatSpecBySlot,
+  getSmokingSlotSpec,
+  rankBreakSlots,
 } from './futariLogic';
 
 test('Database updates: Dina Pratiwi is completely removed, Andri and Tohir (Talent Leaders, JKT) are added', () => {
@@ -1875,3 +1880,39 @@ test('Pre-Deployment Verification: Jr Project Manager RBAC, WFE Dashboard Filter
 
 
 
+
+test('3D Virtual Office capacity: 30 unique cafeteria chairs, 10 unique smoking slots (2x5), deterministic ranking', () => {
+  assert.equal(DINING_SEAT_CAPACITY, 30);
+  assert.equal(SMOKING_SLOT_CAPACITY, 10);
+
+  const seatKeys = new Set<string>();
+  for (let s = 0; s < DINING_SEAT_CAPACITY; s++) {
+    const seat = getDiningSeatSpecBySlot(s);
+    seatKeys.add(`${seat.seatX.toFixed(2)},${seat.seatZ.toFixed(2)}`);
+  }
+  assert.equal(seatKeys.size, 30, 'every cafeteria slot maps to a distinct chair');
+
+  for (const isBandung of [false, true]) {
+    const keys = new Set<string>();
+    const pts: Array<{ x: number; z: number }> = [];
+    for (let s = 0; s < SMOKING_SLOT_CAPACITY; s++) {
+      const p = getSmokingSlotSpec(s, isBandung);
+      keys.add(`${p.x.toFixed(2)},${p.z.toFixed(2)}`);
+      pts.push(p);
+    }
+    assert.equal(keys.size, 10, 'every smoking slot is distinct');
+    let minDist = Infinity;
+    for (let a = 0; a < pts.length; a++)
+      for (let b = a + 1; b < pts.length; b++)
+        minDist = Math.min(minDist, Math.hypot(pts[a].x - pts[b].x, pts[a].z - pts[b].z));
+    assert.ok(minDist >= 1.3, `smoking slots keep a safe spacing (min ${minDist.toFixed(2)}m)`);
+  }
+
+  // Ranking is order-independent => identical on every browser
+  const r1 = rankBreakSlots(['c', 'a', 'b']);
+  const r2 = rankBreakSlots(['b', 'c', 'a']);
+  assert.equal(r1.get('a'), 0);
+  assert.equal(r1.get('b'), 1);
+  assert.equal(r1.get('c'), 2);
+  assert.deepEqual([...r1.entries()].sort(), [...r2.entries()].sort());
+});
