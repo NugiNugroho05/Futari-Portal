@@ -101,6 +101,12 @@ import {
   mapSupabasePersonnelListToStaffList,
   computeRoomGridDeskCoords,
   assignRoomGridCoordinatesToStaffList,
+  COMPANY_ROLES,
+  AVAILABLE_STAFF_ROLES,
+  filterActiveWfePersonnel,
+  normalizeBreakMode,
+  formatBreakModeLabel,
+  applyActiveAttendanceToStaffList,
 } from './futariLogic';
 
 test('Database updates: Dina Pratiwi is completely removed, Andri and Tohir (Talent Leaders, JKT) are added', () => {
@@ -1705,6 +1711,72 @@ test('Post-Launch Fixes: Supabase profile metadata sync, password roundtrip with
     mappedRows.length,
     'Finance division can view all personnel in attendance selectors and Team Management'
   );
+});
+
+test('Pre-Deployment Verification: Jr Project Manager RBAC, WFE Dashboard Filtering, and Break Status (Eating/Sleeping/Smoking) Safe Fallbacks', () => {
+  // 1. Jr Project Manager role exists in all role selectors
+  assert.ok(COMPANY_ROLES.includes('Jr Project Manager'));
+  assert.ok(AVAILABLE_STAFF_ROLES.includes('Jr Project Manager'));
+
+  const nugi = SEED_FUTARI_STAFF_FIXTURE.find((s) => s.staffId === 'des_nugi')!;
+  const afterJrPmUpdate = superadminUpdateAnyProfile(
+    SEED_FUTARI_STAFF_FIXTURE,
+    nugi,
+    'pic_ferdy',
+    {
+      role: 'Jr Project Manager',
+      division: 'PM',
+      supervisor: 'Ade Yenny (Project Manager)',
+      teamMemberIds: ['adm_sesil'],
+    }
+  );
+  const ferdyJrPm = afterJrPmUpdate.find((s) => s.staffId === 'pic_ferdy')!;
+  assert.equal(ferdyJrPm.role, 'Jr Project Manager');
+  assert.equal(ferdyJrPm.division, 'PM');
+  const ferdyAccessibleTeam = getTeamDashboardPersonnel(ferdyJrPm, afterJrPmUpdate);
+  assert.ok(ferdyAccessibleTeam.some((s) => s.staffId === 'pic_ferdy'));
+  assert.ok(ferdyAccessibleTeam.some((s) => s.staffId === 'adm_sesil'));
+
+  // 2. Break mode normalization & null/undefined safe fallbacks
+  assert.equal(normalizeBreakMode('eating'), 'eating');
+  assert.equal(normalizeBreakMode('SLEEPING'), 'sleeping');
+  assert.equal(normalizeBreakMode(' Smoking '), 'smoking');
+  assert.equal(normalizeBreakMode('none'), 'none');
+  assert.equal(normalizeBreakMode(null), 'none');
+  assert.equal(normalizeBreakMode(undefined), 'none');
+  assert.equal(normalizeBreakMode('unknown_value'), 'none');
+  assert.equal(formatBreakModeLabel('sleeping'), 'Sleeping (Tidur / Power Nap)');
+  assert.ok(formatBreakModeLabel(null).length >= 0);
+
+  // 3. Active WFO & WFE filtering + break_status propagation & safe null fallback
+  const todayIso = new Date().toISOString();
+  const mergedWithAttendance = applyActiveAttendanceToStaffList(afterJrPmUpdate, {
+    'nuginugroho2005@gmail.com': {
+      id: 101,
+      email: 'nuginugroho2005@gmail.com',
+      mode: 'WFO',
+      check_in_time: todayIso,
+      clock_out_time: null,
+      break_status: 'sleeping',
+    },
+    'ferdy@futari.id': {
+      id: 102,
+      email: 'ferdy@futari.id',
+      mode: 'WFE',
+      check_in_time: todayIso,
+      clock_out_time: null,
+      break_status: null,
+    },
+  });
+
+  const activeWfo = filterActiveWfoPersonnel(mergedWithAttendance);
+  const activeWfe = filterActiveWfePersonnel(mergedWithAttendance);
+  assert.equal(activeWfo.length, 1);
+  assert.equal(activeWfo[0].email, 'nuginugroho2005@gmail.com');
+  assert.equal(activeWfo[0].breakStatus, 'sleeping');
+  assert.equal(activeWfe.length, 1);
+  assert.equal(activeWfe[0].email, 'ferdy@futari.id');
+  assert.equal(activeWfe[0].breakStatus, 'none');
 });
 
 

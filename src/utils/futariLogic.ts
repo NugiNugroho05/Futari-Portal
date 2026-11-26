@@ -14,6 +14,24 @@ export type DivisionType =
 
 export type BranchType = 'JKT' | 'Bandung' | 'Jawa';
 export type WorkModeType = 'WFO' | 'WFE' | 'OFFLINE';
+export type BreakModeType = 'none' | 'eating' | 'sleeping' | 'smoking';
+
+export function normalizeBreakMode(raw?: string | null): BreakModeType {
+  if (!raw) return 'none';
+  const v = String(raw).trim().toLowerCase();
+  if (v === 'eating' || v === 'sleeping' || v === 'smoking') {
+    return v;
+  }
+  return 'none';
+}
+
+export function formatBreakModeLabel(mode?: BreakModeType | string | null): string {
+  const normalized = normalizeBreakMode(mode);
+  if (normalized === 'eating') return 'Eating (Makan Siang)';
+  if (normalized === 'sleeping') return 'Sleeping (Tidur / Power Nap)';
+  if (normalized === 'smoking') return 'Smoking (Istirahat Merokok)';
+  return 'Working';
+}
 
 export function formatBranchDisplay(branch?: string | null): string {
   if (!branch) return 'JKT';
@@ -91,6 +109,7 @@ export interface StaffMemberRecord {
   location?: 'Jakarta' | 'Bandung' | 'JKT';
   supervisor: string;
   workMode: WorkModeType;
+  breakStatus?: BreakModeType;
   checkInTime: string;
   lateMinutesMonth: number;
   deskZone: VirtualOfficeRoomName;
@@ -940,6 +959,15 @@ export function filterActiveWfoPersonnel(
   staffList: StaffMemberRecord[]
 ): StaffMemberRecord[] {
   return staffList.filter((s) => s.workMode === 'WFO' && !s.isSuspended);
+}
+
+/**
+ * Returns personnel who have actively checked-in today with status === "WFE" (Work From Event).
+ */
+export function filterActiveWfePersonnel(
+  staffList: StaffMemberRecord[]
+): StaffMemberRecord[] {
+  return staffList.filter((s) => s.workMode === 'WFE' && !s.isSuspended);
 }
 
 /**
@@ -2300,6 +2328,7 @@ export const COMPANY_ROLES = [
   'Operasional',
   'Finance',
   'Project Manager',
+  'Jr Project Manager',
   'Person In Charge',
   'Team Leader',
   'Admin',
@@ -2329,6 +2358,7 @@ export const AVAILABLE_STAFF_ROLES: string[] = [
   'Founder & CEO',
   'Operational',
   'Project Manager',
+  'Jr Project Manager',
   'Person In Charge (PIC)',
   'Team Leader (TL)',
   'Talent Leader',
@@ -3444,7 +3474,11 @@ export function normalizeSupabaseDivision(
   ) {
     return 'Executive';
   }
-  if (roleLower === 'pm' || roleLower.includes('project manager')) {
+  if (
+    roleLower === 'pm' ||
+    roleLower.includes('project manager') ||
+    roleLower.includes('jr project manager')
+  ) {
     return 'PM';
   }
   if (roleLower.includes('finance') || roleLower.includes('admin')) {
@@ -3469,6 +3503,7 @@ export interface PersonnelExtendedMetadata {
   avatarColor?: string;
   avatar3DConfig?: Partial<Avatar3DConfig>;
   allowedAttendanceViewerIds?: string[];
+  breakStatus?: BreakModeType;
 }
 
 const PERSONNEL_META_HASH_PREFIX = '#futari_meta=';
@@ -3825,6 +3860,7 @@ export function mapSupabasePersonnelToStaffRecord(
       : undefined,
     allowedAttendanceViewerIds: meta.allowedAttendanceViewerIds,
     prevAuthPassword: meta.prevAuthPassword,
+    breakStatus: normalizeBreakMode(meta.breakStatus),
   };
 }
 
@@ -3871,6 +3907,7 @@ export interface SupabaseAttendanceRow {
   id?: string | number;
   email?: string | null;
   mode?: string | null;
+  break_status?: string | null;
   check_in_time?: string | null;
   clock_out_time?: string | null;
   check_out_time?: string | null;
@@ -4098,7 +4135,7 @@ export function applyActiveAttendanceToStaffList(
   activeAttendanceByEmail: Record<string, SupabaseAttendanceRow>
 ): StaffMemberRecord[] {
   const matchedEmails = new Set<string>();
-  const updatedList = staffList.map((member) => {
+  const updatedList: StaffMemberRecord[] = staffList.map((member) => {
     const emailKey = (member.email || '').trim().toLowerCase();
     const activeRow = emailKey ? activeAttendanceByEmail[emailKey] : undefined;
 
@@ -4106,9 +4143,14 @@ export function applyActiveAttendanceToStaffList(
       matchedEmails.add(emailKey);
       const activeMode: WorkModeType =
         String(activeRow.mode || '').toUpperCase() === 'WFE' ? 'WFE' : 'WFO';
+      const resolvedBreak: BreakModeType =
+        activeRow.break_status
+          ? normalizeBreakMode(activeRow.break_status)
+          : normalizeBreakMode(member.breakStatus);
       return {
         ...member,
         workMode: activeMode,
+        breakStatus: activeMode === 'WFO' ? resolvedBreak : 'none',
         checkInTime: formatAttendanceCheckInHHMM(activeRow.check_in_time),
       };
     }
@@ -4116,6 +4158,7 @@ export function applyActiveAttendanceToStaffList(
     return {
       ...member,
       workMode: 'OFFLINE' as WorkModeType,
+      breakStatus: 'none' as BreakModeType,
       checkInTime: '-',
     };
   });

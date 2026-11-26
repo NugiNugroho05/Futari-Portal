@@ -39,6 +39,12 @@ import {
   Menu,
   RefreshCw,
   UploadCloud,
+  Utensils,
+  BedDouble,
+  Cigarette,
+  Coffee,
+  Play,
+  ChevronDown,
 } from 'lucide-react';
 import {
   INITIAL_FUTARI_STAFF,
@@ -82,6 +88,7 @@ import {
   isDirectReportOf,
   filterAttendanceLogsForUser,
   filterActiveWfoPersonnel,
+  filterActiveWfePersonnel,
   groupActiveWfoByRoom,
   FUTARI_HQ_ADDRESS,
   DEVELOPER_SUPERADMIN_EMAIL,
@@ -157,6 +164,9 @@ import {
   formatBranchDisplay,
   formatRoomDisplayName,
   syncAttendanceLogsWithLeave,
+  BreakModeType,
+  normalizeBreakMode,
+  formatBreakModeLabel,
 } from './utils/futariLogic';
 import { supabase } from './supabaseClient';
 import {
@@ -700,6 +710,7 @@ export default function App() {
   };
 
   // Fetch Attendance records from Supabase `attendance` table (100% Single Source of Truth across devices: HP & Laptop)
+  const attendanceSupportsBreakColRef = useRef<boolean>(false);
   const fetchAttendanceFromSupabase = async () => {
     try {
       const { data, error } = await supabase
@@ -712,6 +723,12 @@ export default function App() {
       }
 
       const rows = data as SupabaseAttendanceRow[];
+      if (rows.length > 0) {
+        attendanceSupportsBreakColRef.current = Object.prototype.hasOwnProperty.call(
+          rows[0],
+          'break_status'
+        );
+      }
       const mappedLogs = rows.map((row) =>
         mapSupabaseAttendanceRowToRecord(row, staffList)
       );
@@ -896,6 +913,58 @@ export default function App() {
       supabase.removeChannel(tasksChannel);
     };
   }, [staffList]);
+
+  // Realtime subscription to `personnel` table in Supabase so breakStatus & avatar changes sync live across all connected users
+  useEffect(() => {
+    const personnelChannel = supabase
+      .channel('portal-personnel-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'personnel',
+        },
+        (payload) => {
+          const updatedRow = payload.new as SupabasePersonnelRow;
+          const cleanEmail = (updatedRow?.email || '').trim().toLowerCase();
+          if (!cleanEmail) return;
+          const mappedMember = mapSupabasePersonnelToStaffRecord(updatedRow, 0);
+          setStaffList((prev) =>
+            prev.map((s) =>
+              (s.email || '').trim().toLowerCase() === cleanEmail
+                ? {
+                    ...s,
+                    breakStatus: mappedMember.breakStatus,
+                    roomName: mappedMember.roomName,
+                    deskZone: mappedMember.deskZone,
+                    avatar3DConfig: mappedMember.avatar3DConfig || s.avatar3DConfig,
+                    avatar_url: mappedMember.avatar_url || s.avatar_url,
+                    photoUrl: mappedMember.photoUrl || s.photoUrl,
+                  }
+                : s
+            )
+          );
+          setCurrentUserProfile((prev) =>
+            prev && (prev.email || '').trim().toLowerCase() === cleanEmail
+              ? {
+                  ...prev,
+                  breakStatus: mappedMember.breakStatus,
+                }
+              : prev
+          );
+          setLocalBreakByEmail((prev) => ({
+            ...prev,
+            [cleanEmail]: normalizeBreakMode(mappedMember.breakStatus),
+          }));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(personnelChannel);
+    };
+  }, []);
 
   // Sync Attendance target employee & Petty Cash allowed event whenever currentUser or eventsList changes
   useEffect(() => {
@@ -1084,6 +1153,136 @@ export default function App() {
   const isCurrentUserCheckedInWfo = Boolean(
     activeCurrentUserCheckIn && activeCurrentUserCheckIn.mode === 'WFO'
   );
+
+  const [isBreakMenuOpen, setIsBreakMenuOpen] = useState<boolean>(false);
+  const [localBreakByEmail, setLocalBreakByEmail] = useState<
+    Record<string, BreakModeType>
+  >({});
+
+  const currentUserBreakStatus: BreakModeType = useMemo(() => {
+    const emailKey = (currentUser.email || '').trim().toLowerCase();
+    if (emailKey && localBreakByEmail[emailKey] !== undefined) {
+      return normalizeBreakMode(localBreakByEmail[emailKey]);
+    }
+    return normalizeBreakMode(currentUser.breakStatus);
+  }, [currentUser.email, currentUser.breakStatus, localBreakByEmail]);
+
+  // Interactive "Break" / "Stop Break" handler (Eating / Sleeping / Smoking) synced to app state & Supabase
+  const handleSelectBreakMode = async (nextMode: BreakModeType) => {
+    setIsBreakMenuOpen(false);
+    const normalized = normalizeBreakMode(nextMode);
+    const userEmail = (currentUser.email || '').trim().toLowerCase();
+
+    // Clear avatar highlight focus when entering break so camera/pose never blocks break animation
+    if (normalized !== 'none' && selectedOfficeStaffId === currentUser.staffId) {
+      setSelectedOfficeStaffId(null);
+    }
+
+    // 1. Optimistic local state update so 3D Virtual Office responds on the very next frame
+    if (userEmail) {
+      setLocalBreakByEmail((prev) => ({
+        ...prev,
+        [userEmail]: normalized,
+      }));
+    }
+    setCurrentUserProfile((prev) =>
+      prev ? { ...prev, breakStatus: normalized } : prev
+    );
+    setStaffList((prev) =>
+      prev.map((s) =>
+        s.staffId === currentUser.staffId ||
+        (userEmail && (s.email || '').trim().toLowerCase() === userEmail)
+          ? { ...s, breakStatus: normalized }
+          : s
+      )
+    );
+    if (userEmail) {
+      setActiveAttendanceByEmail((prev) => {
+        if (!prev[userEmail]) return prev;
+        return {
+          ...prev,
+          [userEmail]: {
+            ...prev[userEmail],
+            break_status: normalized,
+          },
+        };
+      });
+    }
+
+    // 2. Persist breakStatus to Supabase `personnel` metadata (and best-effort `attendance.break_status`)
+    if (userEmail) {
+      try {
+        const { data: existingRow } = await supabase
+          .from('personnel')
+          .select('id, avatar_url')
+          .ilike('email', userEmail)
+          .maybeSingle();
+
+        const basePhoto =
+          existingRow?.avatar_url ||
+          currentUser.avatar_url ||
+          currentUser.photoUrl ||
+          null;
+
+        const encodedAvatarUrl = encodePersonnelAvatarUrlWithMetadata(
+          basePhoto,
+          {
+            roomName: currentUser.roomName,
+            branch: currentUser.branch,
+            avatarColor: currentUser.avatarColor,
+            avatar3DConfig: currentUser.avatar3DConfig,
+            allowedAttendanceViewerIds: currentUser.allowedAttendanceViewerIds,
+            password: currentUser.password,
+            prevAuthPassword: currentUser.prevAuthPassword,
+            breakStatus: normalized,
+          }
+        );
+
+        await supabase
+          .from('personnel')
+          .update({ avatar_url: encodedAvatarUrl })
+          .ilike('email', userEmail);
+      } catch {
+        // Fallback safely to local state if offline
+      }
+
+      if (attendanceSupportsBreakColRef.current) {
+        try {
+          const { error: attBreakErr } = await supabase
+            .from('attendance')
+            .update({ break_status: normalized } as any)
+            .ilike('email', userEmail)
+            .is('clock_out_time', null);
+          if (attBreakErr) {
+            attendanceSupportsBreakColRef.current = false;
+          }
+        } catch {
+          attendanceSupportsBreakColRef.current = false;
+        }
+      }
+    }
+
+    if (normalized === 'none') {
+      showToast({
+        type: 'info',
+        title: `Stop Break — ${currentUser.name}`,
+        message:
+          'Waktu istirahat selesai. Avatar 3D Anda kembali ke meja kerja seperti biasa.',
+      });
+    } else {
+      const label = formatBreakModeLabel(normalized);
+      showToast({
+        type: 'success',
+        title: `Break Aktif: ${label}`,
+        message:
+          normalized === 'eating'
+            ? 'Avatar 3D Anda berjalan menuju Ruang Makan (Cafeteria) untuk makan siang.'
+            : normalized === 'sleeping'
+            ? 'Avatar 3D Anda melempar meja kerja, mengeluarkan kasur empuk dari kantong, dan tidur telentang! Zzz...'
+            : 'Avatar 3D Anda berjalan keluar menuju Outdoor Smoking Area.',
+      });
+    }
+  };
 
   const isCheckInLocked = Boolean(
     activeCurrentUserCheckIn || checkInSuccessData
@@ -2533,9 +2732,18 @@ export default function App() {
       transitionTime
     );
 
-    setStaffList(updatedStaff);
+    const cleanUserEmail = (currentUser.email || '').trim().toLowerCase();
+    if (cleanUserEmail) {
+      setLocalBreakByEmail((prev) => ({ ...prev, [cleanUserEmail]: 'none' }));
+    }
+    setIsBreakMenuOpen(false);
+    setStaffList(
+      updatedStaff.map((s) =>
+        s.staffId === currentUser.staffId ? { ...s, breakStatus: 'none' } : s
+      )
+    );
     setCurrentUserProfile((prev) =>
-      prev ? { ...prev, workMode: 'WFE' } : prev
+      prev ? { ...prev, workMode: 'WFE', breakStatus: 'none' } : prev
     );
     setSelectedWorkMode('WFE');
 
@@ -2809,13 +3017,19 @@ export default function App() {
     if (selectedOfficeStaffId === currentUser.staffId) {
       setSelectedOfficeStaffId(null);
     }
+    if (userEmail) {
+      setLocalBreakByEmail((prev) => ({ ...prev, [userEmail]: 'none' }));
+    }
+    setIsBreakMenuOpen(false);
     setCurrentUserProfile((prev) =>
-      prev ? { ...prev, workMode: 'OFFLINE', checkInTime: '-' } : prev
+      prev
+        ? { ...prev, workMode: 'OFFLINE', checkInTime: '-', breakStatus: 'none' }
+        : prev
     );
     setStaffList((prev) =>
       prev.map((s) =>
         s.staffId === currentUser.staffId
-          ? { ...s, workMode: 'OFFLINE', checkInTime: '-' }
+          ? { ...s, workMode: 'OFFLINE', checkInTime: '-', breakStatus: 'none' }
           : s
       )
     );
@@ -4112,11 +4326,47 @@ export default function App() {
         : currentUserProfile
         ? [currentUserProfile]
         : [];
-    return applyActiveAttendanceToStaffList(baseList, activeAttendanceByEmail);
-  }, [staffList, currentUserProfile, activeAttendanceByEmail]);
+    const applied = applyActiveAttendanceToStaffList(
+      baseList,
+      activeAttendanceByEmail
+    );
+    const activeUserEmail = (currentUser.email || '').trim().toLowerCase();
+    return applied.map((member) => {
+      const emailKey = (member.email || '').trim().toLowerCase();
+      if (member.workMode !== 'WFO') {
+        return { ...member, breakStatus: 'none' };
+      }
+      if (
+        member.staffId === currentUser.staffId ||
+        (activeUserEmail && emailKey === activeUserEmail)
+      ) {
+        return { ...member, breakStatus: currentUserBreakStatus };
+      }
+      if (emailKey && localBreakByEmail[emailKey] !== undefined) {
+        return {
+          ...member,
+          breakStatus: normalizeBreakMode(localBreakByEmail[emailKey]),
+        };
+      }
+      return member;
+    });
+  }, [
+    staffList,
+    currentUserProfile,
+    activeAttendanceByEmail,
+    currentUser.staffId,
+    currentUser.email,
+    currentUserBreakStatus,
+    localBreakByEmail,
+  ]);
 
   const wfoStaffList = useMemo(
     () => filterActiveWfoPersonnel(effectiveOfficeStaffList),
+    [effectiveOfficeStaffList]
+  );
+
+  const wfeStaffList = useMemo(
+    () => filterActiveWfePersonnel(effectiveOfficeStaffList),
     [effectiveOfficeStaffList]
   );
 
@@ -5042,6 +5292,135 @@ export default function App() {
                           {activeCurrentUserCheckIn.checkInTime} WIB)
                         </span>
                       </button>
+
+                      {/* Interactive "Break" & "Stop Break" Button (Eating / Sleeping / Smoking) when active WFO */}
+                      {activeCurrentUserCheckIn.mode === 'WFO' && (
+                        <div className="relative">
+                          {currentUserBreakStatus !== 'none' ? (
+                            <button
+                              type="button"
+                              data-testid="dashboard-stop-break-btn"
+                              onClick={() => handleSelectBreakMode('none')}
+                              className="px-3.5 py-2 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-amber-600 to-rose-600 hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap shadow-md border border-amber-300/40 cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <span>
+                                Stop Break (
+                                {currentUserBreakStatus === 'eating'
+                                  ? 'Eating'
+                                  : currentUserBreakStatus === 'sleeping'
+                                  ? 'Sleeping'
+                                  : 'Smoking'}
+                                )
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              data-testid="dashboard-break-btn"
+                              onClick={() =>
+                                setIsBreakMenuOpen((prev) => !prev)
+                              }
+                              className="px-3.5 py-2 rounded-lg text-xs font-bold text-slate-950 bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-300 hover:to-orange-300 flex items-center gap-1.5 whitespace-nowrap shadow-md border border-amber-200/60 cursor-pointer"
+                            >
+                              <Coffee className="w-3.5 h-3.5" />
+                              <span>Break</span>
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          <AnimatePresence>
+                            {isBreakMenuOpen &&
+                              currentUserBreakStatus === 'none' && (
+                                <motion.div
+                                  initial={{ opacity: 0, y: 6, scale: 0.96 }}
+                                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                                  exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                                  transition={{ duration: 0.16 }}
+                                  data-testid="dashboard-break-popover"
+                                  className={`absolute right-0 mt-2 w-60 rounded-xl border p-1.5 shadow-2xl z-40 ${
+                                    isDark
+                                      ? 'bg-slate-900/95 border-slate-700 text-slate-100'
+                                      : 'bg-white/95 border-slate-200 text-slate-900'
+                                  } backdrop-blur-xl`}
+                                >
+                                  <p className="px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold border-b border-slate-700/40">
+                                    Pilih Mode Istirahat (3D Live)
+                                  </p>
+                                  <button
+                                    type="button"
+                                    data-testid="break-option-eating"
+                                    onClick={() =>
+                                      handleSelectBreakMode('eating')
+                                    }
+                                    className={`w-full mt-1 px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-left transition-colors cursor-pointer ${
+                                      isDark
+                                        ? 'hover:bg-amber-500/20 text-slate-100'
+                                        : 'hover:bg-amber-50 text-slate-800'
+                                    }`}
+                                  >
+                                    <Utensils className="w-4 h-4 text-amber-400 shrink-0" />
+                                    <div>
+                                      <p className="font-bold leading-tight">
+                                        Eating
+                                      </p>
+                                      <p className="text-[10px] opacity-75">
+                                        Ke Ruang Makan (Cafeteria)
+                                      </p>
+                                    </div>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    data-testid="break-option-sleeping"
+                                    onClick={() =>
+                                      handleSelectBreakMode('sleeping')
+                                    }
+                                    className={`w-full px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-left transition-colors cursor-pointer ${
+                                      isDark
+                                        ? 'hover:bg-sky-500/20 text-slate-100'
+                                        : 'hover:bg-sky-50 text-slate-800'
+                                    }`}
+                                  >
+                                    <BedDouble className="w-4 h-4 text-[#00B4D8] shrink-0" />
+                                    <div>
+                                      <p className="font-bold leading-tight">
+                                        Sleeping
+                                      </p>
+                                      <p className="text-[10px] opacity-75">
+                                        Lempar Meja &amp; Gelar Kasur Kantong
+                                      </p>
+                                    </div>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    data-testid="break-option-smoking"
+                                    onClick={() =>
+                                      handleSelectBreakMode('smoking')
+                                    }
+                                    className={`w-full px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-left transition-colors cursor-pointer ${
+                                      isDark
+                                        ? 'hover:bg-emerald-500/20 text-slate-100'
+                                        : 'hover:bg-emerald-50 text-slate-800'
+                                    }`}
+                                  >
+                                    <Cigarette className="w-4 h-4 text-emerald-400 shrink-0" />
+                                    <div>
+                                      <p className="font-bold leading-tight">
+                                        Smoking
+                                      </p>
+                                      <p className="text-[10px] opacity-75">
+                                        Ke Outdoor Smoking Area
+                                      </p>
+                                    </div>
+                                  </button>
+                                </motion.div>
+                              )}
+                          </AnimatePresence>
+                        </div>
+                      )}
+
                       <button
                         type="button"
                         data-testid="dashboard-quick-checkin-btn"
@@ -5089,14 +5468,22 @@ export default function App() {
               {/* 4-Column KPI Summary Strip (Consistent & Concise Typography) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch">
                 <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
-                    Active WFO
-                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                      Active WFO
+                    </p>
+                    <span
+                      data-testid="dashboard-active-wfe-count-badge"
+                      className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30"
+                    >
+                      {wfeStaffList.length} WFE
+                    </span>
+                  </div>
                   <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-[#00B4D8]">
-                    {wfoStaffList.length} / {staffList.length}
+                    {wfoStaffList.length} WFO · {wfeStaffList.length} WFE
                   </p>
                   <p className={`text-[11px] mt-1.5 ${mutedText}`}>
-                    Jakarta HQ &amp; Jawa
+                    Jakarta HQ &amp; Jawa ({staffList.length} Personel)
                   </p>
                 </div>
 
@@ -5144,6 +5531,8 @@ export default function App() {
               <VirtualOffice3D
                 staffList={effectiveOfficeStaffList}
                 currentUserId={currentUser.staffId}
+                currentUserEmail={currentUser.email}
+                currentUserBreakStatus={currentUserBreakStatus}
                 selectedStaffId={selectedOfficeStaffId}
                 onSelectStaff={(staffId) => setSelectedOfficeStaffId(staffId)}
                 newlyAddedStaffId={newlyAddedStaffId}
@@ -5154,39 +5543,33 @@ export default function App() {
                 isDark={isDark}
               />
 
-              {/* Executive Virtual Office Visual Room Grouping & Strict WFO-Only Avatar Grid */}
+              {/* Executive Virtual Office Visual Room Grouping & Active WFO / WFE Grid */}
               <section
                 aria-labelledby="virtual-office-grid-heading"
                 data-testid="virtual-office-rooms-section"
-                className={`p-6 rounded-xl border ${surfaceCard}`}
+                className={`p-6 rounded-xl border ${surfaceCard} space-y-6`}
               >
-                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 pb-4 border-b border-slate-700/30">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="px-2.5 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                        Strict Visibility: WFO Checked-In Only ({wfoStaffList.length} Active)
-                      </span>
-                      <span className="px-2.5 py-0.5 rounded-md text-[11px] font-mono bg-[#00B4D8]/15 text-[#00B4D8]">
-                        9 Rooms / Zones Layout
-                      </span>
-                    </div>
-                    <h2
-                      id="virtual-office-grid-heading"
-                      className="text-lg font-bold font-display mt-1.5"
-                    >
-                      Virtual Office — 9 Room Grouping &amp; Active WFO Avatar Grid
-                    </h2>
-                    <p className={`text-xs ${mutedText}`}>
-                      Hanya menampilkan personel yang aktif Check-In dengan status{' '}
-                      <strong className="text-emerald-400">WFO</strong>. Personel WFE atau Offline disembunyikan sepenuhnya dari 3D Office &amp; Room Grid.
-                    </p>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-700/30">
+                  <h2
+                    id="virtual-office-grid-heading"
+                    className="text-lg font-bold font-display"
+                  >
+                    Virtual Office — Room Grouping &amp; Active WFO / WFE
+                  </h2>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                      {wfoStaffList.length} Active WFO
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30">
+                      {wfeStaffList.length} Active WFE
+                    </span>
                   </div>
                 </div>
 
                 {/* 9-Room Grid Layout using Tailwind CSS Grid & Flexbox */}
                 <div
                   data-testid="virtual-office-9-rooms-grid"
-                  className="mt-5 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
+                  className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
                 >
                   {virtualOfficeRooms.map((room) => (
                     <div
@@ -5199,21 +5582,16 @@ export default function App() {
                       }`}
                     >
                       <div>
-                        {/* Room Header */}
-                        <div className="flex items-start justify-between gap-2 pb-3 border-b border-slate-700/30">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className="w-2.5 h-2.5 rounded-full shrink-0"
-                                style={{ backgroundColor: room.accentColor }}
-                              />
-                              <h3 className="text-sm font-bold font-display leading-snug">
-                                {formatRoomDisplayName(room.roomName)}
-                              </h3>
-                            </div>
-                            <p className={`text-[11px] mt-0.5 ${mutedText}`}>
-                              {room.subtitle}
-                            </p>
+                        {/* Room Header (Clean & Concise without verbose subtitle) */}
+                        <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-700/30">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: room.accentColor }}
+                            />
+                            <h3 className="text-sm font-bold font-display leading-snug truncate">
+                              {formatRoomDisplayName(room.roomName)}
+                            </h3>
                           </div>
 
                           <span className="px-2 py-0.5 rounded-md text-[11px] font-mono font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
@@ -5221,7 +5599,7 @@ export default function App() {
                           </span>
                         </div>
 
-                        {/* Active WFO Personnel Avatars inside this Room (Strictly WFO ONLY) */}
+                        {/* Active WFO Personnel Avatars inside this Room */}
                         {room.activeWfoMembers.length > 0 ? (
                           <div className="mt-3.5 flex flex-col gap-2">
                             {room.activeWfoMembers.map((member) => (
@@ -5235,7 +5613,7 @@ export default function App() {
                                     prev === member.staffId ? null : member.staffId
                                   )
                                 }
-                                className={`p-2.5 rounded-xl border flex items-center justify-between gap-3 text-left transition-colors ${
+                                className={`p-2.5 rounded-xl border flex items-center justify-between gap-3 text-left transition-colors cursor-pointer ${
                                   selectedOfficeStaffId === member.staffId
                                     ? 'border-[#00B4D8] bg-[#00B4D8]/15'
                                     : isDark
@@ -5258,10 +5636,10 @@ export default function App() {
                                   </div>
 
                                   <div className="min-w-0">
-                                    <p className="text-xs font-bold leading-tight">
+                                    <p className="text-xs font-bold leading-tight truncate">
                                       {member.name}
                                     </p>
-                                    <p className={`text-[11px] leading-tight mt-0.5 ${mutedText}`}>
+                                    <p className={`text-[11px] leading-tight mt-0.5 truncate ${mutedText}`}>
                                       {member.role} · {formatBranchDisplay(member.branch)}
                                     </p>
                                   </div>
@@ -5276,13 +5654,114 @@ export default function App() {
                         ) : (
                           <div className="mt-3.5 py-5 px-3 rounded-lg border border-dashed border-slate-700/50 text-center">
                             <p className={`text-xs ${mutedText}`}>
-                              Tidak ada personel WFO aktif di ruangan ini
+                              Tidak ada personel WFO aktif
                             </p>
                           </div>
                         )}
                       </div>
                     </div>
                   ))}
+                </div>
+
+                {/* Active WFE (Work From Event / Lapangan) Section */}
+                <div
+                  data-testid="active-wfe-dashboard-section"
+                  className={`p-4 sm:p-5 rounded-xl border ${
+                    isDark
+                      ? 'bg-slate-950/75 border-[#00B4D8]/30'
+                      : 'bg-sky-50/70 border-[#00B4D8]/30'
+                  } space-y-3.5`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-700/30">
+                    <div className="flex items-center gap-2">
+                      <MapPin className="w-4 h-4 text-[#00B4D8]" />
+                      <h3 className="text-sm font-bold font-display">
+                        Active WFE (Event / Lapangan)
+                      </h3>
+                    </div>
+                    <span className="px-2.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30">
+                      {wfeStaffList.length} WFE Aktif
+                    </span>
+                  </div>
+
+                  {wfeStaffList.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {wfeStaffList.map((member) => {
+                        const emailKey = (member.email || '').trim().toLowerCase();
+                        const activeAttRow = emailKey
+                          ? activeAttendanceByEmail[emailKey]
+                          : undefined;
+                        const matchedLog = attendanceLogs.find(
+                          (l) =>
+                            (l.staffId === member.staffId ||
+                              (emailKey &&
+                                (l.email || '').trim().toLowerCase() ===
+                                  emailKey)) &&
+                            l.mode === 'WFE' &&
+                            (!l.checkOutTime || l.checkOutTime === '-')
+                        );
+                        const eventLocationText =
+                          (activeAttRow?.location_address || '').trim() ||
+                          (matchedLog?.location_address || '').trim() ||
+                          (matchedLog?.locationWatermark || '').trim() ||
+                          'Lokasi Event / Venue Lapangan';
+
+                        return (
+                          <div
+                            key={member.staffId}
+                            data-testid={`wfe-card-${member.staffId}`}
+                            className={`p-3 rounded-xl border flex flex-col justify-between gap-2 ${
+                              isDark
+                                ? 'bg-slate-900/90 border-slate-800'
+                                : 'bg-white border-slate-200'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2.5">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="relative shrink-0">
+                                  <div
+                                    className="w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-xs shadow-sm border-2 border-[#00B4D8]"
+                                    style={{ backgroundColor: member.avatarColor }}
+                                  >
+                                    {member.initials}
+                                  </div>
+                                  <span
+                                    aria-hidden="true"
+                                    className="w-2.5 h-2.5 rounded-full bg-[#00B4D8] border-2 border-slate-950 absolute -bottom-0.5 -right-0.5"
+                                  />
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-xs font-bold leading-tight truncate">
+                                    {member.name}
+                                  </p>
+                                  <p className={`text-[11px] leading-tight mt-0.5 truncate ${mutedText}`}>
+                                    {member.role} · {member.division}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-mono tabular-nums text-[#00B4D8] bg-[#00B4D8]/15 border border-[#00B4D8]/30 font-bold shrink-0">
+                                WFE · {member.checkInTime} WIB
+                              </span>
+                            </div>
+
+                            <div className="flex items-start gap-1.5 text-[11px] text-slate-400 pt-1 border-t border-slate-800/40">
+                              <MapPin className="w-3.5 h-3.5 text-[#00B4D8] shrink-0 mt-0.5" />
+                              <span className="line-clamp-2 break-words">
+                                {eventLocationText}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="py-4 px-3 rounded-lg border border-dashed border-slate-700/50 text-center">
+                      <p className={`text-xs ${mutedText}`}>
+                        Tidak ada personel yang sedang bertugas WFE (Work From Event) saat ini
+                      </p>
+                    </div>
+                  )}
                 </div>
               </section>
             </div>
