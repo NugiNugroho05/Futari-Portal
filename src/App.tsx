@@ -1013,7 +1013,7 @@ export default function App() {
       fetchAttendanceFromSupabase();
     };
 
-    const intervalId = window.setInterval(runSilentSync, 5000);
+    const intervalId = window.setInterval(runSilentSync, 4000);
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
         runSilentSync();

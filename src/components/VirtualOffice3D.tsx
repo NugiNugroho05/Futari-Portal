@@ -167,6 +167,73 @@ function createFloatingNameTagSprite(
 }
 
 /**
+ * Deterministic shared animation clock (seconds). Derived from the wall-clock epoch so that every
+ * browser (Jakarta, Jawa, any device) computes the SAME `elapsed` at the same real second, which makes
+ * all avatar activity cycles (typing, stretching, inter-room visits, chat bubbles, poses) identical on all screens.
+ */
+const SHARED_ANIMATION_EPOCH_MS = 1_700_000_000_000;
+function getSharedAnimationSeconds(): number {
+  return (Date.now() - SHARED_ANIMATION_EPOCH_MS) / 1000;
+}
+
+const BREAK_BADGE_STYLES: Record<
+  Exclude<BreakModeType, 'none'>,
+  { label: string; fill: string; stroke: string }
+> = {
+  eating: { label: '🍽 Break · Eating', fill: 'rgba(217, 119, 6, 0.95)', stroke: '#fbbf24' },
+  sleeping: { label: '😴 Break · Sleeping', fill: 'rgba(79, 70, 229, 0.95)', stroke: '#a5b4fc' },
+  smoking: { label: '🚬 Break · Smoking', fill: 'rgba(71, 85, 105, 0.95)', stroke: '#cbd5e1' },
+};
+
+/** Small floating badge shown under/above an avatar while that employee is on Break. */
+function createBreakBadgeSprite(): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 48;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(1.7, 0.32, 1);
+  sprite.visible = false;
+  sprite.userData = { badgeKind: 'none', badgeCanvas: canvas };
+  return sprite;
+}
+
+function updateBreakBadgeSprite(sprite: THREE.Sprite, kind: BreakModeType) {
+  if (sprite.userData.badgeKind === kind) return;
+  sprite.userData.badgeKind = kind;
+  if (kind === 'none') {
+    sprite.visible = false;
+    return;
+  }
+  const canvas = sprite.userData.badgeCanvas as HTMLCanvasElement;
+  const ctx = canvas.getContext('2d');
+  const style = BREAK_BADGE_STYLES[kind];
+  if (ctx && style) {
+    ctx.clearRect(0, 0, 256, 48);
+    ctx.fillStyle = style.fill;
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(4, 4, 248, 40, 16);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(style.label, 128, 31);
+  }
+  const mat = sprite.material as THREE.SpriteMaterial;
+  if (mat.map) mat.map.needsUpdate = true;
+  sprite.visible = true;
+}
+
+/**
  * Creates a floating 3D architectural banner sprite for Building Titles & Entrance/Exit Doors.
  */
 function createArchitecturalLabelSprite(
@@ -2964,7 +3031,7 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       if (!isMounted) return;
       loadTodayActiveAttendance();
       loadPersonnelBreaks();
-    }, 5000);
+    }, 4000);
 
     const handleWindowFocusSync = () => {
       if (!isMounted || document.visibilityState !== 'visible') return;
@@ -3087,6 +3154,13 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       ),
     [resolvedStaffWithRealtimePresence, selectedStaffId]
   );
+  const highlightedBreakStatus: BreakModeType = useMemo(() => {
+    if (!highlightedHud) return 'none';
+    const match = resolvedStaffWithRealtimePresence.find(
+      (s) => s.staffId === highlightedHud.staffId
+    );
+    return normalizeBreakMode(match?.breakStatus);
+  }, [highlightedHud, resolvedStaffWithRealtimePresence]);
 
   // Trigger walk-in animation when walkInStaffId, newlyAddedStaffId, or realtimeSpawnedStaffId changes
   useEffect(() => {
@@ -3719,6 +3793,8 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       visitSpotX: number;
       visitSpotZ: number;
       visitPartnerStaffId: string | null;
+      syncIndex: number;
+      breakBadgeSprite: THREE.Sprite;
       isBeingVisitedForChat: boolean;
       chatVisitorWorldPos: { x: number; z: number } | null;
       breakStatus: BreakModeType;
@@ -3986,6 +4062,10 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       nameSprite.userData = { staffId: person.staffId };
       avatarActorGroup.add(nameSprite);
 
+      const breakBadgeSprite = createBreakBadgeSprite();
+      breakBadgeSprite.position.set(0, 2.32, 0);
+      avatarActorGroup.add(breakBadgeSprite);
+
       const appearanceSignature = `${person.name}|${person.role}|${person.roomName}|${cfg3D.gender || ''}|${cfg3D.shirtColor}|${cfg3D.hairStyle}|${cfg3D.hairColor}|${cfg3D.useHijab}|${cfg3D.hijabColor}|${cfg3D.outfitType || 'formal_shirt'}`;
 
       // Precompute collision-free corridor & doorway waypoints for:
@@ -4138,6 +4218,8 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
         visitSpotX,
         visitSpotZ,
         visitPartnerStaffId: null,
+        syncIndex: 0,
+        breakBadgeSprite,
         isBeingVisitedForChat: false,
         chatVisitorWorldPos: null,
         breakStatus: initialBreak,
@@ -4410,8 +4492,12 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       });
 
       // 3. Pair each avatar with an active coworker in another room (if available) for inter-room Thought/Chat Bubble visits
-      const allEntries = Array.from(avatarEntriesMap.values());
+      // Entries are sorted by a stable key (staffId) so every browser derives the SAME syncIndex & partner pairing
+      const allEntries = Array.from(avatarEntriesMap.values()).sort((a, b) =>
+        a.staffId < b.staffId ? -1 : a.staffId > b.staffId ? 1 : 0
+      );
       allEntries.forEach((entry, eIdx) => {
+        entry.syncIndex = eIdx;
         const sameBuildingPeers = allEntries.filter(
           (other) =>
             other.staffId !== entry.staffId &&
@@ -4580,7 +4666,8 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const dt = Math.min(clock.getDelta(), 0.1);
-      const elapsed = clock.getElapsedTime();
+      // Deterministic shared clock (epoch-based) => identical avatar cycles on every user's screen
+      const elapsed = getSharedAnimationSeconds();
 
       // A. Smooth Camera Interpolation between Jakarta HQ & Bandung Branch
       if (cameraFlyGoal) {
@@ -4639,7 +4726,6 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       const cyclePeriod = 34.0;
 
       // PASS 0: Live real-time `break_status` synchronization for EVERY individual employee & Inter-Room Chat Bubble Partner Pairing
-      let scanIdx = 0;
       avatarEntriesMap.forEach((entry) => {
         entry.isBeingVisitedForChat = false;
         entry.chatVisitorWorldPos = null;
@@ -4675,10 +4761,18 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
         if (entry.breakStatus !== resolvedLiveBreak) {
           applyBreakTransitionToEntry(entry, resolvedLiveBreak, true);
         }
+
+        // Small floating "Break (Eating / Sleeping / Smoking)" badge that follows the name tag
+        updateBreakBadgeSprite(entry.breakBadgeSprite, entry.breakStatus);
+        entry.breakBadgeSprite.position.set(
+          entry.nameSprite.position.x,
+          entry.nameSprite.position.y + 0.36,
+          entry.nameSprite.position.z
+        );
       });
 
       avatarEntriesMap.forEach((entry) => {
-        const sIdx = scanIdx++;
+        const sIdx = entry.syncIndex;
         const entryHighlighted = entry.staffId === activeSelectedId;
         const staffTimeOffset =
           sIdx * 11.7 + (entry.staffName.charCodeAt(0) % 11) * 2.3;
@@ -4714,9 +4808,8 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       });
 
       // PASS 1: Pose & Animation Execution (Break overrides ALWAYS take priority!)
-      let idx = 0;
       avatarEntriesMap.forEach((entry) => {
-        const i = idx++;
+        const i = entry.syncIndex;
         const isHighlighted = entry.staffId === activeSelectedId;
 
         // 1. Elastic Desk & Chair Pop-Up / Drop Animation when new user checks in WFO
@@ -6005,6 +6098,21 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
                   {highlightedHud.statusText}
                 </span>
               </div>
+
+              {highlightedBreakStatus !== 'none' && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Break:</span>
+                  </span>
+                  <span
+                    data-testid="hud-break-status"
+                    className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                  >
+                    Break ({formatBreakModeLabel(highlightedBreakStatus)})
+                  </span>
+                </div>
+              )}
 
               <div className="flex items-center justify-between gap-2">
                 <span className="text-slate-400 flex items-center gap-1.5">
