@@ -107,6 +107,8 @@ import {
   normalizeBreakMode,
   formatBreakModeLabel,
   applyActiveAttendanceToStaffList,
+  resolveIndividualBreakStatus,
+  isMissingBreakStatusColumnError,
 } from './futariLogic';
 
 test('Database updates: Dina Pratiwi is completely removed, Andri and Tohir (Talent Leaders, JKT) are added', () => {
@@ -1777,6 +1779,97 @@ test('Pre-Deployment Verification: Jr Project Manager RBAC, WFE Dashboard Filter
   assert.equal(activeWfe.length, 1);
   assert.equal(activeWfe[0].email, 'ferdy@futari.id');
   assert.equal(activeWfe[0].breakStatus, 'none');
+
+  // 4. Multi-user per-individual break_status sync across personnel.break_status & attendance.break_status
+  const multiUserDirectory = mapSupabasePersonnelListToStaffList([
+    {
+      id: 1,
+      name: 'Nugi Nugroho',
+      email: 'nuginugroho2005@gmail.com',
+      role: 'Digital',
+      division: 'Design_Talent_Production',
+      break_status: 'eating',
+      status: 'active',
+    },
+    {
+      id: 2,
+      name: 'Izah',
+      email: 'izah.futari@gmail.com',
+      role: 'HRD',
+      division: 'HRD',
+      break_status: 'sleeping',
+      status: 'active',
+    },
+    {
+      id: 3,
+      name: 'Gusman Razak',
+      email: 'gusman.futari@gmail.com',
+      role: 'Project Manager',
+      division: 'PM',
+      break_status: 'none',
+      status: 'active',
+    },
+  ]);
+
+  const syncedWfoStaff = filterActiveWfoPersonnel(
+    applyActiveAttendanceToStaffList(multiUserDirectory, {
+      'nuginugroho2005@gmail.com': {
+        id: 201,
+        email: 'nuginugroho2005@gmail.com',
+        mode: 'WFO',
+        check_in_time: todayIso,
+        clock_out_time: null,
+        break_status: 'eating',
+      },
+      'izah.futari@gmail.com': {
+        id: 202,
+        email: 'izah.futari@gmail.com',
+        mode: 'WFO',
+        check_in_time: todayIso,
+        clock_out_time: null,
+        break_status: null, // Even if attendance.break_status is null, personnel.break_status ('sleeping') applies!
+      },
+      'gusman.futari@gmail.com': {
+        id: 203,
+        email: 'gusman.futari@gmail.com',
+        mode: 'WFO',
+        check_in_time: todayIso,
+        clock_out_time: null,
+        break_status: 'smoking', // Even if personnel.break_status is 'none', attendance.break_status ('smoking') applies!
+      },
+    })
+  );
+
+  assert.equal(syncedWfoStaff.length, 3);
+  assert.equal(
+    syncedWfoStaff.find((s) => s.email === 'nuginugroho2005@gmail.com')?.breakStatus,
+    'eating'
+  );
+  assert.equal(
+    syncedWfoStaff.find((s) => s.email === 'izah.futari@gmail.com')?.breakStatus,
+    'sleeping'
+  );
+  assert.equal(
+    syncedWfoStaff.find((s) => s.email === 'gusman.futari@gmail.com')?.breakStatus,
+    'smoking'
+  );
+
+  // Stop Break ('none') on both personnel and attendance resets individual breakStatus to 'none'
+  assert.equal(
+    resolveIndividualBreakStatus({
+      personnelBreakStatus: 'none',
+      attendanceBreakStatus: 'none',
+      avatarMetaBreakStatus: 'none',
+    }),
+    'none'
+  );
+  assert.equal(
+    isMissingBreakStatusColumnError({
+      code: 'PGRST204',
+      message: "Could not find the 'break_status' column of 'attendance' in the schema cache",
+    }),
+    true
+  );
 });
 
 

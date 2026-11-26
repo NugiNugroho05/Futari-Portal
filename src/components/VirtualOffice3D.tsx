@@ -29,6 +29,7 @@ import {
   formatBreakModeLabel,
   decodePersonnelAvatarUrlAndMetadata,
   SupabasePersonnelRow,
+  resolveIndividualBreakStatus,
 } from '../utils/futariLogic';
 import { supabase } from '../supabaseClient';
 import {
@@ -2677,7 +2678,11 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
   const [activeAttendanceByEmail, setActiveAttendanceByEmail] = useState<
     Record<string, SupabaseAttendanceRow>
   >({});
-  // Live Break Status State hydrated & subscribed from Supabase `personnel` table
+  const activeAttendanceByEmailRef = useRef<
+    Record<string, SupabaseAttendanceRow>
+  >({});
+  activeAttendanceByEmailRef.current = activeAttendanceByEmail;
+  // Live Per-Employee Break Status State hydrated & subscribed from Supabase `personnel` table (`break_status` + metadata)
   const [realtimeBreakByEmail, setRealtimeBreakByEmail] = useState<
     Record<string, BreakModeType>
   >({});
@@ -2786,23 +2791,23 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
 
     loadTodayActiveAttendance();
 
-    // Also hydrate & subscribe to `personnel` break_status metadata so breaks sync live across tabs/users
+    // Hydrate & subscribe to `personnel` per-employee `break_status` column (+ avatar_url metadata fallback)
     const loadPersonnelBreaks = async () => {
       try {
-        const { data } = await supabase
-          .from('personnel')
-          .select('email, avatar_url');
-        if (!isMounted || !Array.isArray(data)) return;
+        const { data, error } = await supabase.from('personnel').select('*');
+        if (!isMounted || error || !Array.isArray(data)) return;
         const map: Record<string, BreakModeType> = {};
-        for (const row of data as Array<{ email?: string | null; avatar_url?: string | null }>) {
+        for (const row of data as SupabasePersonnelRow[]) {
           const emailKey = (row.email || '').trim().toLowerCase();
           if (!emailKey) continue;
           const decoded = decodePersonnelAvatarUrlAndMetadata(row.avatar_url);
-          if (decoded.meta.breakStatus) {
-            map[emailKey] = normalizeBreakMode(decoded.meta.breakStatus);
-          }
+          map[emailKey] = resolveIndividualBreakStatus({
+            personnelBreakStatus: row.break_status,
+            avatarMetaBreakStatus: decoded.meta.breakStatus,
+          });
         }
-        setRealtimeBreakByEmail((prev) => ({ ...map, ...prev }));
+        // Always apply fresh DB values so remote Break / Stop Break changes update immediately
+        setRealtimeBreakByEmail(map);
       } catch {
         // Non-fatal
       }
@@ -2814,23 +2819,42 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*',
           schema: 'public',
           table: 'personnel',
         },
         (payload) => {
           if (!isMounted) return;
-          const updatedRow = payload.new as SupabasePersonnelRow;
+          const updatedRow = payload.new as SupabasePersonnelRow | undefined;
           const emailKey = (updatedRow?.email || '').trim().toLowerCase();
-          if (!emailKey) return;
-          const decoded = decodePersonnelAvatarUrlAndMetadata(
-            updatedRow.avatar_url
-          );
-          const nextBreak = normalizeBreakMode(decoded.meta.breakStatus);
-          setRealtimeBreakByEmail((prev) => ({
-            ...prev,
-            [emailKey]: nextBreak,
-          }));
+          if (updatedRow && emailKey) {
+            const hasBreakCol =
+              updatedRow.break_status !== undefined &&
+              updatedRow.break_status !== null &&
+              String(updatedRow.break_status).trim() !== '';
+            const hasAvatarCol = Object.prototype.hasOwnProperty.call(
+              updatedRow,
+              'avatar_url'
+            );
+            if (hasBreakCol || hasAvatarCol) {
+              const decoded = decodePersonnelAvatarUrlAndMetadata(
+                updatedRow.avatar_url
+              );
+              const nextBreak = resolveIndividualBreakStatus({
+                personnelBreakStatus: updatedRow.break_status,
+                avatarMetaBreakStatus: decoded.meta.breakStatus,
+              });
+              setRealtimeBreakByEmail((prev) => ({
+                ...prev,
+                [emailKey]: nextBreak,
+              }));
+            } else {
+              // If Postgres WAL omitted TOASTed columns, fetch fresh personnel breaks immediately
+              loadPersonnelBreaks();
+            }
+          } else {
+            loadPersonnelBreaks();
+          }
         }
       )
       .subscribe();
@@ -2934,8 +2958,27 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       )
       .subscribe();
 
+    // Silent 5-second background auto-polling fallback for `personnel` & `attendance`
+    // Guarantees live cross-user Break animations (Eating / Sleeping / Smoking / Stop Break) even if WebSocket disconnects
+    const pollIntervalId = window.setInterval(() => {
+      if (!isMounted) return;
+      loadTodayActiveAttendance();
+      loadPersonnelBreaks();
+    }, 5000);
+
+    const handleWindowFocusSync = () => {
+      if (!isMounted || document.visibilityState !== 'visible') return;
+      loadTodayActiveAttendance();
+      loadPersonnelBreaks();
+    };
+    window.addEventListener('focus', handleWindowFocusSync);
+    document.addEventListener('visibilitychange', handleWindowFocusSync);
+
     return () => {
       isMounted = false;
+      window.clearInterval(pollIntervalId);
+      window.removeEventListener('focus', handleWindowFocusSync);
+      document.removeEventListener('visibilitychange', handleWindowFocusSync);
       supabase.removeChannel(attendanceChannel);
       supabase.removeChannel(personnelBreakChannel);
     };
@@ -2978,13 +3021,19 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       const isCurrentUserMatch =
         (currentUserId && resolvedMember.staffId === currentUserId) ||
         (cleanActiveEmail && emailKey === cleanActiveEmail);
+      const activeAttRow = emailKey ? activeAttendanceByEmail[emailKey] : undefined;
+      const personnelRealtimeBreak = emailKey
+        ? realtimeBreakByEmail[emailKey]
+        : undefined;
 
-      let effectiveBreak: BreakModeType = normalizeBreakMode(
-        original?.breakStatus ?? resolvedMember.breakStatus
-      );
-      if (emailKey && realtimeBreakByEmail[emailKey] !== undefined) {
-        effectiveBreak = normalizeBreakMode(realtimeBreakByEmail[emailKey]);
-      }
+      // Read THIS individual employee's break_status from Supabase `attendance` & `personnel`
+      let effectiveBreak: BreakModeType = resolveIndividualBreakStatus({
+        personnelBreakStatus:
+          personnelRealtimeBreak ?? original?.breakStatus ?? resolvedMember.breakStatus,
+        attendanceBreakStatus: activeAttRow?.break_status,
+        fallbackBreakStatus: resolvedMember.breakStatus,
+      });
+
       if (isCurrentUserMatch && currentUserBreakStatus !== undefined) {
         effectiveBreak = normalizeBreakMode(currentUserBreakStatus);
       }
@@ -4585,34 +4634,37 @@ export const VirtualOffice3D: React.FC<VirtualOffice3DProps> = ({
       const liveCurrentEmail = currentUserEmailRef.current;
       const liveCurrentBreak = currentUserBreakStatusRef.current;
       const livePersonnelBreaks = realtimeBreakByEmailRef.current;
+      const liveAttendanceRows = activeAttendanceByEmailRef.current;
 
       const cyclePeriod = 34.0;
 
-      // PASS 0: Live real-time `break_status` synchronization & Inter-Room Chat Bubble Partner Pairing
+      // PASS 0: Live real-time `break_status` synchronization for EVERY individual employee & Inter-Room Chat Bubble Partner Pairing
       let scanIdx = 0;
       avatarEntriesMap.forEach((entry) => {
         entry.isBeingVisitedForChat = false;
         entry.chatVisitorWorldPos = null;
 
-        // Read latest break_status directly inside Three.js render loop (single source of truth override)
+        // Read THIS employee's latest break_status directly from Supabase `personnel` & `attendance` inside Three.js render loop
         const matchedStaff = liveStaffArray.find(
           (s) =>
             s.staffId === entry.staffId ||
             (entry.staffEmail &&
               (s.email || '').trim().toLowerCase() === entry.staffEmail)
         );
+        const employeeAttRow = entry.staffEmail
+          ? liveAttendanceRows[entry.staffEmail]
+          : undefined;
+        const employeePersonnelBreak = entry.staffEmail
+          ? livePersonnelBreaks[entry.staffEmail]
+          : undefined;
 
-        let resolvedLiveBreak: BreakModeType = normalizeBreakMode(
-          matchedStaff?.breakStatus ?? entry.breakStatus
-        );
-        if (
-          entry.staffEmail &&
-          livePersonnelBreaks[entry.staffEmail] !== undefined
-        ) {
-          resolvedLiveBreak = normalizeBreakMode(
-            livePersonnelBreaks[entry.staffEmail]
-          );
-        }
+        let resolvedLiveBreak: BreakModeType = resolveIndividualBreakStatus({
+          personnelBreakStatus:
+            employeePersonnelBreak ?? matchedStaff?.breakStatus,
+          attendanceBreakStatus: employeeAttRow?.break_status,
+          fallbackBreakStatus: matchedStaff?.breakStatus ?? entry.breakStatus,
+        });
+
         const isCurrentLoggedInAvatar =
           (liveCurrentId && entry.staffId === liveCurrentId) ||
           (liveCurrentEmail && entry.staffEmail === liveCurrentEmail);

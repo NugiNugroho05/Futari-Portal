@@ -135,6 +135,7 @@ export interface SupabasePersonnelRow {
   avatar_url?: string | null;
   supervisor_email?: string | null;
   status?: string | null;
+  break_status?: string | null;
 }
 
 export interface VirtualOfficeRoomDefinition {
@@ -3506,6 +3507,63 @@ export interface PersonnelExtendedMetadata {
   breakStatus?: BreakModeType;
 }
 
+/**
+ * Detects whether a PostgREST / Supabase error indicates that `break_status` column
+ * has not yet been created on `personnel` or `attendance`.
+ */
+export function isMissingBreakStatusColumnError(err: any): boolean {
+  if (!err) return false;
+  const code = String(err.code || '');
+  const msg = String(err.message || err.details || err.hint || '');
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    (/break_status/i.test(msg) &&
+      /does not exist|could not find|schema cache|unknown column/i.test(msg))
+  );
+}
+
+/**
+ * Resolves an individual employee's live `breakStatus` ('eating' | 'sleeping' | 'smoking' | 'none')
+ * from Supabase `personnel.break_status`, `attendance.break_status`, and fallback `personnel.avatar_url` metadata.
+ */
+export function resolveIndividualBreakStatus(params: {
+  personnelBreakStatus?: string | null;
+  attendanceBreakStatus?: string | null;
+  avatarMetaBreakStatus?: string | null;
+  fallbackBreakStatus?: string | null;
+}): BreakModeType {
+  const attNorm =
+    params.attendanceBreakStatus !== undefined &&
+    params.attendanceBreakStatus !== null &&
+    String(params.attendanceBreakStatus).trim() !== ''
+      ? normalizeBreakMode(params.attendanceBreakStatus)
+      : undefined;
+  const perNorm =
+    params.personnelBreakStatus !== undefined &&
+    params.personnelBreakStatus !== null &&
+    String(params.personnelBreakStatus).trim() !== ''
+      ? normalizeBreakMode(params.personnelBreakStatus)
+      : undefined;
+  const metaNorm =
+    params.avatarMetaBreakStatus !== undefined &&
+    params.avatarMetaBreakStatus !== null &&
+    String(params.avatarMetaBreakStatus).trim() !== ''
+      ? normalizeBreakMode(params.avatarMetaBreakStatus)
+      : undefined;
+
+  // Active break ('eating' | 'sleeping' | 'smoking') on either attendance or personnel column takes immediate priority
+  if (attNorm && attNorm !== 'none') return attNorm;
+  if (perNorm && perNorm !== 'none') return perNorm;
+
+  // If either DB column is explicitly set to 'none', treat as 'none'
+  if (attNorm === 'none' || perNorm === 'none') return 'none';
+
+  // Fallback to avatar_url metadata or member state when DB columns are null/absent
+  if (metaNorm !== undefined) return metaNorm;
+  return normalizeBreakMode(params.fallbackBreakStatus);
+}
+
 const PERSONNEL_META_HASH_PREFIX = '#futari_meta=';
 
 export function normalizeVirtualOfficeRoomName(
@@ -3860,7 +3918,10 @@ export function mapSupabasePersonnelToStaffRecord(
       : undefined,
     allowedAttendanceViewerIds: meta.allowedAttendanceViewerIds,
     prevAuthPassword: meta.prevAuthPassword,
-    breakStatus: normalizeBreakMode(meta.breakStatus),
+    breakStatus: resolveIndividualBreakStatus({
+      personnelBreakStatus: row.break_status,
+      avatarMetaBreakStatus: meta.breakStatus,
+    }),
   };
 }
 
@@ -4143,10 +4204,10 @@ export function applyActiveAttendanceToStaffList(
       matchedEmails.add(emailKey);
       const activeMode: WorkModeType =
         String(activeRow.mode || '').toUpperCase() === 'WFE' ? 'WFE' : 'WFO';
-      const resolvedBreak: BreakModeType =
-        activeRow.break_status
-          ? normalizeBreakMode(activeRow.break_status)
-          : normalizeBreakMode(member.breakStatus);
+      const resolvedBreak: BreakModeType = resolveIndividualBreakStatus({
+        personnelBreakStatus: member.breakStatus,
+        attendanceBreakStatus: activeRow.break_status,
+      });
       return {
         ...member,
         workMode: activeMode,

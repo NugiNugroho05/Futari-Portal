@@ -158,6 +158,8 @@ import {
   decodePersonnelAvatarUrlAndMetadata,
   encodePersonnelAvatarUrlWithMetadata,
   SupabaseAttendanceRow,
+  isMissingBreakStatusColumnError,
+  resolveIndividualBreakStatus,
   isAttendanceRowActiveForToday,
   applyActiveAttendanceToStaffList,
   formatRealTimeHHMM,
@@ -710,7 +712,10 @@ export default function App() {
   };
 
   // Fetch Attendance records from Supabase `attendance` table (100% Single Source of Truth across devices: HP & Laptop)
-  const attendanceSupportsBreakColRef = useRef<boolean>(false);
+  const personnelSupportsBreakColRef = useRef<boolean>(true);
+  const attendanceSupportsBreakColRef = useRef<boolean>(true);
+  const lastLocalBreakActionAtRef = useRef<number>(0);
+
   const fetchAttendanceFromSupabase = async () => {
     try {
       const { data, error } = await supabase
@@ -723,11 +728,11 @@ export default function App() {
       }
 
       const rows = data as SupabaseAttendanceRow[];
-      if (rows.length > 0) {
-        attendanceSupportsBreakColRef.current = Object.prototype.hasOwnProperty.call(
-          rows[0],
-          'break_status'
-        );
+      if (
+        rows.length > 0 &&
+        Object.prototype.hasOwnProperty.call(rows[0], 'break_status')
+      ) {
+        attendanceSupportsBreakColRef.current = true;
       }
       const mappedLogs = rows.map((row) =>
         mapSupabaseAttendanceRowToRecord(row, staffList)
@@ -914,49 +919,79 @@ export default function App() {
     };
   }, [staffList]);
 
-  // Realtime subscription to `personnel` table in Supabase so breakStatus & avatar changes sync live across all connected users
+  // Realtime subscription to `personnel` table in Supabase so break_status & avatar changes sync live across all connected users
   useEffect(() => {
     const personnelChannel = supabase
       .channel('portal-personnel-realtime')
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*',
           schema: 'public',
           table: 'personnel',
         },
         (payload) => {
-          const updatedRow = payload.new as SupabasePersonnelRow;
+          const updatedRow = payload.new as SupabasePersonnelRow | undefined;
           const cleanEmail = (updatedRow?.email || '').trim().toLowerCase();
-          if (!cleanEmail) return;
-          const mappedMember = mapSupabasePersonnelToStaffRecord(updatedRow, 0);
-          setStaffList((prev) =>
-            prev.map((s) =>
-              (s.email || '').trim().toLowerCase() === cleanEmail
-                ? {
-                    ...s,
-                    breakStatus: mappedMember.breakStatus,
-                    roomName: mappedMember.roomName,
-                    deskZone: mappedMember.deskZone,
-                    avatar3DConfig: mappedMember.avatar3DConfig || s.avatar3DConfig,
-                    avatar_url: mappedMember.avatar_url || s.avatar_url,
-                    photoUrl: mappedMember.photoUrl || s.photoUrl,
-                  }
-                : s
-            )
-          );
-          setCurrentUserProfile((prev) =>
-            prev && (prev.email || '').trim().toLowerCase() === cleanEmail
-              ? {
+          if (updatedRow && cleanEmail) {
+            const hasAvatarCol = Object.prototype.hasOwnProperty.call(
+              updatedRow,
+              'avatar_url'
+            );
+            const mappedMember = mapSupabasePersonnelToStaffRecord(updatedRow, 0);
+            const explicitRowBreak =
+              updatedRow.break_status !== undefined &&
+              updatedRow.break_status !== null &&
+              String(updatedRow.break_status).trim() !== ''
+                ? normalizeBreakMode(updatedRow.break_status)
+                : hasAvatarCol
+                ? normalizeBreakMode(mappedMember.breakStatus)
+                : undefined;
+
+            setStaffList((prev) =>
+              prev.map((s) =>
+                (s.email || '').trim().toLowerCase() === cleanEmail
+                  ? {
+                      ...s,
+                      breakStatus:
+                        explicitRowBreak !== undefined
+                          ? explicitRowBreak
+                          : s.breakStatus,
+                      roomName: hasAvatarCol ? mappedMember.roomName : s.roomName,
+                      deskZone: hasAvatarCol ? mappedMember.deskZone : s.deskZone,
+                      avatar3DConfig: hasAvatarCol
+                        ? mappedMember.avatar3DConfig || s.avatar3DConfig
+                        : s.avatar3DConfig,
+                      avatar_url: hasAvatarCol
+                        ? mappedMember.avatar_url || s.avatar_url
+                        : s.avatar_url,
+                      photoUrl: hasAvatarCol
+                        ? mappedMember.photoUrl || s.photoUrl
+                        : s.photoUrl,
+                    }
+                  : s
+              )
+            );
+            if (explicitRowBreak !== undefined) {
+              setCurrentUserProfile((prev) =>
+                prev && (prev.email || '').trim().toLowerCase() === cleanEmail
+                  ? {
+                      ...prev,
+                      breakStatus: explicitRowBreak,
+                    }
+                  : prev
+              );
+              setLocalBreakByEmail((prev) => {
+                if (!(cleanEmail in prev)) return prev;
+                return {
                   ...prev,
-                  breakStatus: mappedMember.breakStatus,
-                }
-              : prev
-          );
-          setLocalBreakByEmail((prev) => ({
-            ...prev,
-            [cleanEmail]: normalizeBreakMode(mappedMember.breakStatus),
-          }));
+                  [cleanEmail]: explicitRowBreak,
+                };
+              });
+            }
+          }
+          // Always pull full fresh directory silently (handles TOASTed avatar_url or partial WAL payloads)
+          refreshPersonnelDirectory();
         }
       )
       .subscribe();
@@ -965,6 +1000,34 @@ export default function App() {
       supabase.removeChannel(personnelChannel);
     };
   }, []);
+
+  // Silent 5-second background auto-polling fallback for `personnel` & `attendance` on Dashboard / active sessions
+  // Ensures live multi-user break_status & WFO/WFE animations stay synced even if Realtime WebSocket drops.
+  useEffect(() => {
+    if (!isAuthenticated && activeTab !== 'home') return;
+
+    const runSilentSync = () => {
+      // Avoid overwriting an in-flight local Break click within the last 1.8s
+      if (Date.now() - lastLocalBreakActionAtRef.current < 1800) return;
+      refreshPersonnelDirectory();
+      fetchAttendanceFromSupabase();
+    };
+
+    const intervalId = window.setInterval(runSilentSync, 5000);
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        runSilentSync();
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [isAuthenticated, activeTab, currentUser.email, staffList.length]);
 
   // Sync Attendance target employee & Petty Cash allowed event whenever currentUser or eventsList changes
   useEffect(() => {
@@ -1164,14 +1227,119 @@ export default function App() {
     if (emailKey && localBreakByEmail[emailKey] !== undefined) {
       return normalizeBreakMode(localBreakByEmail[emailKey]);
     }
-    return normalizeBreakMode(currentUser.breakStatus);
-  }, [currentUser.email, currentUser.breakStatus, localBreakByEmail]);
+    const activeRow = emailKey ? activeAttendanceByEmail[emailKey] : undefined;
+    return resolveIndividualBreakStatus({
+      personnelBreakStatus: currentUser.breakStatus,
+      attendanceBreakStatus: activeRow?.break_status,
+    });
+  }, [
+    currentUser.email,
+    currentUser.breakStatus,
+    localBreakByEmail,
+    activeAttendanceByEmail,
+  ]);
+
+  // Helper to persist a user's `break_status` directly to BOTH `personnel` and `attendance` in Supabase
+  const persistBreakStatusToSupabase = async (
+    targetStaff: StaffMemberRecord,
+    normalized: BreakModeType
+  ) => {
+    const userEmail = (targetStaff.email || '').trim().toLowerCase();
+    const rawStaffId = String(targetStaff.id || targetStaff.staffId || '').trim();
+    const hasRealDbId =
+      rawStaffId.length > 0 &&
+      !rawStaffId.startsWith('sup_') &&
+      !rawStaffId.startsWith('usr_') &&
+      !rawStaffId.includes('_');
+
+    if (!userEmail && !hasRealDbId) return;
+
+    const updatePersonnelTask = (async () => {
+      try {
+        let selectQuery = supabase.from('personnel').select('*');
+        if (hasRealDbId) {
+          selectQuery = selectQuery.eq('id', rawStaffId);
+        } else {
+          selectQuery = selectQuery.ilike('email', userEmail);
+        }
+        const { data: existingRow } = await selectQuery.maybeSingle();
+
+        const basePhoto =
+          existingRow?.avatar_url ||
+          targetStaff.avatar_url ||
+          targetStaff.photoUrl ||
+          null;
+        const existingDecoded = decodePersonnelAvatarUrlAndMetadata(basePhoto);
+
+        const encodedAvatarUrl = encodePersonnelAvatarUrlWithMetadata(
+          existingDecoded.cleanPhotoUrl,
+          {
+            ...existingDecoded.meta,
+            roomName: targetStaff.roomName || existingDecoded.meta.roomName,
+            branch: targetStaff.branch || existingDecoded.meta.branch,
+            avatarColor: targetStaff.avatarColor || existingDecoded.meta.avatarColor,
+            avatar3DConfig:
+              targetStaff.avatar3DConfig || existingDecoded.meta.avatar3DConfig,
+            allowedAttendanceViewerIds:
+              targetStaff.allowedAttendanceViewerIds ??
+              existingDecoded.meta.allowedAttendanceViewerIds,
+            password: targetStaff.password ?? existingDecoded.meta.password,
+            prevAuthPassword:
+              targetStaff.prevAuthPassword ?? existingDecoded.meta.prevAuthPassword,
+            breakStatus: normalized,
+          }
+        );
+
+        const resolvedId = existingRow?.id ?? (hasRealDbId ? rawStaffId : null);
+        const buildUpdateQuery = (payload: Record<string, any>) => {
+          const q = supabase.from('personnel').update(payload);
+          return resolvedId !== null && resolvedId !== undefined
+            ? q.eq('id', resolvedId)
+            : q.ilike('email', userEmail);
+        };
+
+        if (personnelSupportsBreakColRef.current) {
+          const { error: perErr } = await buildUpdateQuery({
+            break_status: normalized,
+            avatar_url: encodedAvatarUrl,
+          });
+          if (perErr && isMissingBreakStatusColumnError(perErr)) {
+            personnelSupportsBreakColRef.current = false;
+            await buildUpdateQuery({ avatar_url: encodedAvatarUrl });
+          }
+        } else {
+          await buildUpdateQuery({ avatar_url: encodedAvatarUrl });
+        }
+      } catch {
+        // Fallback safely to local state if offline
+      }
+    })();
+
+    const updateAttendanceTask = (async () => {
+      if (!userEmail || !attendanceSupportsBreakColRef.current) return;
+      try {
+        const { error: attBreakErr } = await supabase
+          .from('attendance')
+          .update({ break_status: normalized } as any)
+          .ilike('email', userEmail)
+          .is('clock_out_time', null);
+        if (attBreakErr && isMissingBreakStatusColumnError(attBreakErr)) {
+          attendanceSupportsBreakColRef.current = false;
+        }
+      } catch {
+        // Ignore if offline
+      }
+    })();
+
+    await Promise.all([updatePersonnelTask, updateAttendanceTask]);
+  };
 
   // Interactive "Break" / "Stop Break" handler (Eating / Sleeping / Smoking) synced to app state & Supabase
   const handleSelectBreakMode = async (nextMode: BreakModeType) => {
     setIsBreakMenuOpen(false);
     const normalized = normalizeBreakMode(nextMode);
     const userEmail = (currentUser.email || '').trim().toLowerCase();
+    lastLocalBreakActionAtRef.current = Date.now();
 
     // Clear avatar highlight focus when entering break so camera/pose never blocks break animation
     if (normalized !== 'none' && selectedOfficeStaffId === currentUser.staffId) {
@@ -1209,58 +1377,8 @@ export default function App() {
       });
     }
 
-    // 2. Persist breakStatus to Supabase `personnel` metadata (and best-effort `attendance.break_status`)
-    if (userEmail) {
-      try {
-        const { data: existingRow } = await supabase
-          .from('personnel')
-          .select('id, avatar_url')
-          .ilike('email', userEmail)
-          .maybeSingle();
-
-        const basePhoto =
-          existingRow?.avatar_url ||
-          currentUser.avatar_url ||
-          currentUser.photoUrl ||
-          null;
-
-        const encodedAvatarUrl = encodePersonnelAvatarUrlWithMetadata(
-          basePhoto,
-          {
-            roomName: currentUser.roomName,
-            branch: currentUser.branch,
-            avatarColor: currentUser.avatarColor,
-            avatar3DConfig: currentUser.avatar3DConfig,
-            allowedAttendanceViewerIds: currentUser.allowedAttendanceViewerIds,
-            password: currentUser.password,
-            prevAuthPassword: currentUser.prevAuthPassword,
-            breakStatus: normalized,
-          }
-        );
-
-        await supabase
-          .from('personnel')
-          .update({ avatar_url: encodedAvatarUrl })
-          .ilike('email', userEmail);
-      } catch {
-        // Fallback safely to local state if offline
-      }
-
-      if (attendanceSupportsBreakColRef.current) {
-        try {
-          const { error: attBreakErr } = await supabase
-            .from('attendance')
-            .update({ break_status: normalized } as any)
-            .ilike('email', userEmail)
-            .is('clock_out_time', null);
-          if (attBreakErr) {
-            attendanceSupportsBreakColRef.current = false;
-          }
-        } catch {
-          attendanceSupportsBreakColRef.current = false;
-        }
-      }
-    }
+    // 2. Persist break_status directly to BOTH `personnel` and `attendance` in Supabase so all other users see it live
+    await persistBreakStatusToSupabase(currentUser, normalized);
 
     if (normalized === 'none') {
       showToast({
@@ -1308,17 +1426,17 @@ export default function App() {
   ): Promise<StaffMemberRecord | null> => {
     const cleanEmail = email.trim().toLowerCase();
 
-    // 1. Query the logged-in user's record from the `personnel` table in Supabase
+    // 1. Query the logged-in user's record from the `personnel` table in Supabase (select * includes break_status)
     const { data: userRow, error: userRowError } = await supabase
       .from('personnel')
-      .select('id, created_at, name, email, role, division, avatar_url, supervisor_email, status')
+      .select('*')
       .ilike('email', cleanEmail)
       .maybeSingle();
 
     // 2. Also fetch the `personnel` directory from Supabase to populate `staffList`
     const { data: allRows } = await supabase
       .from('personnel')
-      .select('id, created_at, name, email, role, division, avatar_url, supervisor_email, status')
+      .select('*')
       .order('created_at', { ascending: true });
 
     const mappedDirectory = Array.isArray(allRows)
@@ -2088,19 +2206,55 @@ export default function App() {
     await refreshPersonnelDirectory();
   };
 
-  // Global refresh function to fetch latest personnel from Supabase and synchronize staffList
+  // Global refresh function to fetch latest personnel (including `break_status`) from Supabase and synchronize staffList
   const refreshPersonnelDirectory = async () => {
     try {
       const { data: allRows, error: dirError } = await supabase
         .from('personnel')
-        .select('id, created_at, name, email, role, division, avatar_url, supervisor_email, status')
+        .select('*')
         .order('created_at', { ascending: true });
 
       if (!dirError && Array.isArray(allRows)) {
+        if (
+          allRows.length > 0 &&
+          Object.prototype.hasOwnProperty.call(allRows[0], 'break_status')
+        ) {
+          personnelSupportsBreakColRef.current = true;
+        }
         const mapped = mapSupabasePersonnelListToStaffList(
           allRows as SupabasePersonnelRow[]
         );
         setStaffList(mapped);
+
+        // Keep currentUserProfile breakStatus synced with Supabase if not mid-click
+        if (Date.now() - lastLocalBreakActionAtRef.current >= 1800) {
+          setCurrentUserProfile((prev) => {
+            if (!prev) return prev;
+            const cleanPrevEmail = (prev.email || '').trim().toLowerCase();
+            const freshMatch = mapped.find(
+              (m) => (m.email || '').trim().toLowerCase() === cleanPrevEmail
+            );
+            if (!freshMatch) return prev;
+            if (prev.breakStatus === freshMatch.breakStatus) return prev;
+            return { ...prev, breakStatus: freshMatch.breakStatus };
+          });
+          setLocalBreakByEmail((prev) => {
+            if (Object.keys(prev).length === 0) return prev;
+            const next = { ...prev };
+            let changed = false;
+            for (const m of mapped) {
+              const eKey = (m.email || '').trim().toLowerCase();
+              if (eKey && eKey in next) {
+                const nextB = normalizeBreakMode(m.breakStatus);
+                if (next[eKey] !== nextB) {
+                  next[eKey] = nextB;
+                  changed = true;
+                }
+              }
+            }
+            return changed ? next : prev;
+          });
+        }
       }
     } catch {
       // Ignore refresh error
@@ -2737,6 +2891,7 @@ export default function App() {
       setLocalBreakByEmail((prev) => ({ ...prev, [cleanUserEmail]: 'none' }));
     }
     setIsBreakMenuOpen(false);
+    persistBreakStatusToSupabase(currentUser, 'none');
     setStaffList(
       updatedStaff.map((s) =>
         s.staffId === currentUser.staffId ? { ...s, breakStatus: 'none' } : s
@@ -3021,6 +3176,7 @@ export default function App() {
       setLocalBreakByEmail((prev) => ({ ...prev, [userEmail]: 'none' }));
     }
     setIsBreakMenuOpen(false);
+    persistBreakStatusToSupabase(currentUser, 'none');
     setCurrentUserProfile((prev) =>
       prev
         ? { ...prev, workMode: 'OFFLINE', checkInTime: '-', breakStatus: 'none' }
@@ -4342,13 +4498,15 @@ export default function App() {
       ) {
         return { ...member, breakStatus: currentUserBreakStatus };
       }
-      if (emailKey && localBreakByEmail[emailKey] !== undefined) {
-        return {
-          ...member,
-          breakStatus: normalizeBreakMode(localBreakByEmail[emailKey]),
-        };
-      }
-      return member;
+      // Every other employee reads their own individual break_status from Supabase `personnel` & `attendance`
+      const memberAttRow = emailKey ? activeAttendanceByEmail[emailKey] : undefined;
+      return {
+        ...member,
+        breakStatus: resolveIndividualBreakStatus({
+          personnelBreakStatus: member.breakStatus,
+          attendanceBreakStatus: memberAttRow?.break_status,
+        }),
+      };
     });
   }, [
     staffList,
