@@ -10,6 +10,7 @@ import {
   Pencil,
   Check,
   X,
+  ChevronDown,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import {
@@ -146,6 +147,7 @@ export const TasksManagementTab: React.FC<TasksManagementTabProps> = ({
   const [filterMode, setFilterMode] = useState<'ACTIVE' | 'ALL' | 'COMPLETED' | 'MINE'>(
     'ACTIVE'
   );
+  const [isMobileTaskFormOpen, setIsMobileTaskFormOpen] = useState<boolean>(false);
 
   const surfaceCard = isDark
     ? 'bg-slate-900/60 backdrop-blur-md border border-slate-700/50 shadow-2xl text-slate-100'
@@ -183,6 +185,7 @@ export const TasksManagementTab: React.FC<TasksManagementTabProps> = ({
 
     setTaskTitleInput('');
     setDescriptionInput('');
+    setIsMobileTaskFormOpen(false);
   };
 
   const handleStartEdit = (task: WorkTaskItem) => {
@@ -279,22 +282,44 @@ export const TasksManagementTab: React.FC<TasksManagementTabProps> = ({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
-      className="space-y-6"
+      className="space-y-3.5 md:space-y-6"
       data-testid="tasks-management-tab"
     >
-      {/* Clean Header Banner */}
-      <div className={`p-4 md:p-6 rounded-2xl border min-w-0 ${surfaceCard}`}>
-        <h1 className="text-lg md:text-2xl font-bold font-display break-words">
-          Jobdesk
-        </h1>
+      {/* Clean Header Banner + Mobile Collapsible CTA */}
+      <div className={`p-3.5 md:p-6 rounded-2xl border min-w-0 ${surfaceCard}`}>
+        <div className="flex items-center justify-between gap-2.5">
+          <h1 className="text-lg md:text-2xl font-bold font-display break-words">
+            Jobdesk
+          </h1>
+
+          {/* Mobile CTA Button: opens collapsible Add Task Form so Task List is immediately on screen */}
+          <button
+            type="button"
+            data-testid="mobile-toggle-create-task-btn"
+            onClick={() => setIsMobileTaskFormOpen((prev) => !prev)}
+            className="md:hidden px-3 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 shadow-md flex items-center gap-1.5 shrink-0 cursor-pointer"
+          >
+            <PlusCircle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              {isMobileTaskFormOpen ? 'Tutup Form' : '+ Tambah Pekerjaan'}
+            </span>
+            <ChevronDown
+              className={`w-3.5 h-3.5 shrink-0 transition-transform ${
+                isMobileTaskFormOpen ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-        {/* LEFT COLUMN: Add New Task Form */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 md:gap-6 items-start">
+        {/* LEFT COLUMN: Add New Task Form (Collapsible on Mobile < 768px, Always Open on Desktop) */}
         <form
           onSubmit={handleCreateTaskSubmit}
           data-testid="create-work-task-form"
-          className={`xl:col-span-5 p-4 md:p-6 rounded-2xl border ${surfaceCard} space-y-4 min-w-0`}
+          className={`${
+            isMobileTaskFormOpen ? 'block' : 'hidden md:block'
+          } xl:col-span-5 p-3.5 md:p-6 rounded-2xl border ${surfaceCard} space-y-3 md:space-y-4 min-w-0`}
         >
           <div className="flex items-center justify-between border-b border-slate-700/40 pb-3">
             <h2 className="text-sm sm:text-base font-bold font-display flex items-center gap-2 text-[#00B4D8]">
@@ -413,17 +438,17 @@ export const TasksManagementTab: React.FC<TasksManagementTabProps> = ({
 
         {/* RIGHT COLUMN: Task List */}
         <div
-          className={`xl:col-span-7 p-4 md:p-6 rounded-2xl border ${surfaceCard} space-y-4 min-w-0`}
+          className={`xl:col-span-7 p-3.5 md:p-6 rounded-2xl border ${surfaceCard} space-y-3 md:space-y-4 min-w-0`}
         >
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-700/40 pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 md:gap-3 border-b border-slate-700/40 pb-2.5 md:pb-3">
             <div>
-              <h2 className="text-base font-bold font-display flex items-center gap-2">
+              <h2 className="text-sm sm:text-base font-bold font-display flex items-center gap-2">
                 <UserCheck className="w-4 h-4 text-[#00B4D8]" />
                 <span>Daftar Pekerjaan ({filteredTasks.length})</span>
               </h2>
             </div>
 
-            <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-nowrap sm:flex-wrap pb-0.5 sm:pb-0">
               {(
                 [
                   { id: 'ACTIVE', label: `Aktif (${activeCount})` },
@@ -436,7 +461,7 @@ export const TasksManagementTab: React.FC<TasksManagementTabProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => setFilterMode(tab.id)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`px-2.5 md:px-3 py-1.5 rounded-lg text-[11px] md:text-xs font-semibold transition-colors cursor-pointer shrink-0 whitespace-nowrap ${
                     filterMode === tab.id
                       ? 'bg-[#0277BD] text-white shadow-sm'
                       : isDark
@@ -450,7 +475,7 @@ export const TasksManagementTab: React.FC<TasksManagementTabProps> = ({
             </div>
           </div>
 
-          <div data-testid="work-tasks-list" className="space-y-3">
+          <div data-testid="work-tasks-list" className="space-y-2.5 md:space-y-3">
             {filteredTasks.length === 0 && (
               <div
                 data-testid="tasks-empty-state"

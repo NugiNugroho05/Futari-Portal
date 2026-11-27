@@ -20,6 +20,14 @@ import {
   calculateLateMinutes,
   calculateOvertime,
   getActivePayrollCycle,
+  getRecentPayrollCycles,
+  formatCustomDateRangeLabel,
+  filterAttendanceLogsByDateRange,
+  canSelectHistoricalPayrollCycle,
+  formatRoomDisplayName,
+  isJawaRoomName,
+  normalizeVirtualOfficeRoomName,
+  syncAttendanceLogsWithLeave,
   calculatePettyCashSummary,
   buildMonthlyCalendarGrid,
   canViewAllPettyCash,
@@ -1915,4 +1923,154 @@ test('3D Virtual Office capacity: 30 unique cafeteria chairs, 10 unique smoking 
   assert.equal(r1.get('b'), 1);
   assert.equal(r1.get('c'), 2);
   assert.deepEqual([...r1.entries()].sort(), [...r2.entries()].sort());
+});
+
+test('Cabang Jawa rename with Cabang Bandung fallback & 3D Virtual Office Jawa mapping', () => {
+  assert.equal(formatRoomDisplayName('Cabang Bandung'), 'Cabang Jawa');
+  assert.equal(formatRoomDisplayName('Cabang Jawa'), 'Cabang Jawa');
+  assert.equal(isJawaRoomName('Cabang Bandung'), true);
+  assert.equal(isJawaRoomName('Cabang Jawa'), true);
+  assert.equal(isJawaRoomName('Ruangan Finance'), false);
+
+  // Both legacy "Cabang Bandung" and new "Cabang Jawa" normalize to the Gedung Jawa canonical room
+  assert.equal(normalizeVirtualOfficeRoomName('Cabang Bandung'), 'Cabang Bandung');
+  assert.equal(normalizeVirtualOfficeRoomName('Cabang Jawa'), 'Cabang Bandung');
+  assert.equal(normalizeVirtualOfficeRoomName('Virtual Office Jawa'), 'Cabang Bandung');
+
+  // Self-service room switch to Cabang Jawa updates branch & maps smoothly to Gedung Jawa
+  const nugi = SEED_FUTARI_STAFF_FIXTURE.find((s) => s.staffId === 'des_nugi')!;
+  const movedToJawa = updateOwnProfileSelfService(
+    SEED_FUTARI_STAFF_FIXTURE,
+    nugi.staffId,
+    { roomName: 'Cabang Jawa' }
+  );
+  const updatedNugi = movedToJawa.find((s) => s.staffId === 'des_nugi')!;
+  assert.equal(isBandungPersonnel(updatedNugi), true);
+  assert.equal(updatedNugi.branch, 'Jawa');
+  assert.ok(updatedNugi.deskCoords.x > 20, 'Desk coords move to Gedung Jawa platform (X > 20)');
+
+  // Switching back to a Jakarta room resets branch to JKT
+  const movedBackToJkt = updateOwnProfileSelfService(
+    movedToJawa,
+    nugi.staffId,
+    { roomName: 'Ruangan Creative/Design' }
+  );
+  const restoredNugi = movedBackToJkt.find((s) => s.staffId === 'des_nugi')!;
+  assert.equal(restoredNugi.branch, 'JKT');
+  assert.equal(isBandungPersonnel(restoredNugi), false);
+});
+
+test('Historical Payroll Cycles (12 months), Date Range Filtering, and Accurate Historical Exports', () => {
+  const cycles = getRecentPayrollCycles(new Date(2026, 10, 26), 12); // 26 Nov 2026
+  assert.equal(cycles.length, 12);
+  assert.equal(cycles[0].startDate, '2026-11-26');
+  assert.equal(cycles[0].endDate, '2026-12-25');
+  assert.equal(cycles[0].isCurrent, true);
+  assert.equal(cycles[1].startDate, '2026-10-26');
+  assert.equal(cycles[1].endDate, '2026-11-25');
+  assert.equal(cycles[1].isCurrent, false);
+  assert.equal(cycles[2].startDate, '2026-09-26');
+  assert.equal(cycles[2].endDate, '2026-10-25');
+
+  const customLabel = formatCustomDateRangeLabel('2026-10-01', '2026-10-15');
+  assert.ok(customLabel.includes('2026'));
+
+  const nugi = SEED_FUTARI_STAFF_FIXTURE.find((s) => s.staffId === 'des_nugi')!;
+  const erlita = SEED_FUTARI_STAFF_FIXTURE.find((s) => s.staffId === 'fin_erlita')!;
+  const ade = SEED_FUTARI_STAFF_FIXTURE.find((s) => s.staffId === 'pm_ade')!;
+  assert.equal(canSelectHistoricalPayrollCycle(erlita, SEED_FUTARI_STAFF_FIXTURE), true);
+  assert.equal(canSelectHistoricalPayrollCycle(ade, SEED_FUTARI_STAFF_FIXTURE), true);
+  assert.equal(canSelectHistoricalPayrollCycle(nugi, SEED_FUTARI_STAFF_FIXTURE), true);
+
+  const sampleLogs: AttendanceRecord[] = [
+    {
+      id: 'log_oct',
+      staffId: 'des_nugi',
+      staffName: 'Nugi Nugroho',
+      role: 'Digital',
+      branch: 'JKT',
+      date: '2026-10-15',
+      mode: 'WFO',
+      checkInTime: '10:20',
+      checkOutTime: '21:00',
+      regularHours: 9.7,
+      lateMinutes: 15,
+      overtimeHours: 1,
+      overtimePay: 7000,
+      overtimeNote: 'Oktober task',
+      locationWatermark: FUTARI_HQ_ADDRESS,
+      status: 'completed',
+    },
+    {
+      id: 'log_nov',
+      staffId: 'des_nugi',
+      staffName: 'Nugi Nugroho',
+      role: 'Digital',
+      branch: 'JKT',
+      date: '2026-11-10',
+      mode: 'WFO',
+      checkInTime: '09:55',
+      checkOutTime: '19:00',
+      regularHours: 9.1,
+      lateMinutes: 0,
+      overtimeHours: 0,
+      overtimePay: 0,
+      overtimeNote: 'November task',
+      locationWatermark: FUTARI_HQ_ADDRESS,
+      status: 'completed',
+    },
+  ];
+
+  const sepOctLogs = filterAttendanceLogsByDateRange(
+    sampleLogs,
+    cycles[2].startDate,
+    cycles[2].endDate
+  );
+  assert.equal(sepOctLogs.length, 1);
+  assert.equal(sepOctLogs[0].id, 'log_oct');
+
+  // Historical export must NOT synthesize fake today rows for staff with 0 logs in that past period
+  const historicalTeamExport = buildTeamDashboardExportLogs(
+    erlita,
+    sampleLogs,
+    SEED_FUTARI_STAFF_FIXTURE,
+    'ALL_VISIBLE',
+    '2026-11-26',
+    SEED_FUTARI_STAFF_FIXTURE,
+    {
+      startDate: cycles[2].startDate,
+      endDate: cycles[2].endDate,
+      synthesizeMissing: false,
+    }
+  );
+  assert.equal(historicalTeamExport.length, 1);
+  const totals = calculateAttendanceExportTotals(historicalTeamExport);
+  assert.equal(totals.totalRegularHours, 9.7);
+  assert.equal(totals.totalOvertimeHours, 1);
+  assert.equal(totals.totalLateMinutes, 15);
+
+  // Leave sync respects dateRange clamping
+  const syncedClamped = syncAttendanceLogsWithLeave(
+    sepOctLogs,
+    [
+      {
+        id: 'lv_dec',
+        staffId: 'des_nugi',
+        staffName: 'Nugi Nugroho',
+        role: 'Digital',
+        divisionLabel: 'Design/Talent/Production',
+        branch: 'JKT',
+        leaveType: 'Cuti Tahunan',
+        badgeLabel: 'CUTI',
+        startDate: '2026-12-02',
+        endDate: '2026-12-03',
+        reason: 'Liburan Desember',
+        status: 'Approved',
+      },
+    ],
+    nugi,
+    [],
+    { startDate: cycles[2].startDate, endDate: cycles[2].endDate }
+  );
+  assert.equal(syncedClamped.length, 1, 'December leave must not leak into Sep-Oct payroll cycle');
 });

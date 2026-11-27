@@ -39,6 +39,10 @@ import {
   isDeveloperSuperadmin,
   normalizeSupabaseDivision,
   getGlassSurfaceClasses,
+  formatRoomDisplayName,
+  formatBranchDisplay,
+  isJawaRoomName,
+  normalizeVirtualOfficeRoomName,
 } from '../utils/futariLogic';
 
 interface UserManagementTabProps {
@@ -161,6 +165,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
         person.role.toLowerCase().includes(q) ||
         person.divisionLabel.toLowerCase().includes(q) ||
         person.roomName.toLowerCase().includes(q) ||
+        formatRoomDisplayName(person.roomName).toLowerCase().includes(q) ||
         (person.supervisor || '').toLowerCase().includes(q)
       );
     });
@@ -233,7 +238,9 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
     setEditDivision(person.division);
     setEditBranch(person.branch);
     setEditSupervisor(resolvedSupValue);
-    setEditRoomName(person.roomName);
+    setEditRoomName(
+      normalizeVirtualOfficeRoomName(person.roomName) || person.roomName
+    );
     setEditWorkMode(person.workMode);
     setEditTeamMemberIds(currentDirectReports);
     setEditAllowedViewerIds(person.allowedAttendanceViewerIds || []);
@@ -273,7 +280,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
 
     try {
       const effectiveBranch: BranchType =
-        editRoomName === 'Cabang Bandung' ? 'Bandung' : editBranch;
+        isJawaRoomName(editRoomName) ? 'Jawa' : 'JKT';
       if (onSuperadminEditFullProfile) {
         await onSuperadminEditFullProfile(editingStaff.staffId, {
           name: editName.trim() || editingStaff.name,
@@ -304,7 +311,9 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
       triggerToast(
         `Pengaturan "${
           editName.trim() || editingStaff.name
-        }" (Role: ${editRole}, Divisi: ${editDivision}, Ruangan: ${editRoomName}) berhasil disimpan ke Supabase.`,
+        }" (Role: ${editRole}, Divisi: ${editDivision}, Ruangan: ${formatRoomDisplayName(
+          editRoomName
+        )}) berhasil disimpan ke Supabase.`,
         'success'
       );
       // Close modal ONLY after successful save
@@ -429,130 +438,129 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
       data-testid="developer-user-management-tab"
-      className="space-y-6"
+      className="space-y-3.5 md:space-y-6"
     >
       {/* Developer / Superadmin Technical Header */}
-      <div className={`rounded-2xl p-5 sm:p-6 relative overflow-hidden ${surfacePanel}`}>
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/50">
-                <Shield className="w-3.5 h-3.5" />
-                <span>DEVELOPER USER MANAGEMENT CONSOLE</span>
+      <div className={`rounded-2xl p-3.5 sm:p-5 md:p-6 relative overflow-hidden ${surfacePanel}`}>
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 md:gap-4">
+          <div className="space-y-1.5 md:space-y-2 min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2 md:px-2.5 py-0.5 md:py-1 rounded-md text-[10px] md:text-[11px] font-mono font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/50">
+                <Shield className="w-3 h-3 md:w-3.5 md:h-3.5 shrink-0" />
+                <span>DEVELOPER CONSOLE</span>
               </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono bg-cyan-500/15 text-[#00B4D8] border border-cyan-500/40">
-                <Terminal className="w-3.5 h-3.5" />
-                <span>ACCESS_LEVEL: {currentUser.accessLevel?.toUpperCase() || 'DEVELOPER'}</span>
+              <span className="inline-flex items-center gap-1 px-2 md:px-2.5 py-0.5 md:py-1 rounded-md text-[10px] md:text-[11px] font-mono bg-cyan-500/15 text-[#00B4D8] border border-cyan-500/40">
+                <Terminal className="w-3 h-3 md:w-3.5 md:h-3.5 shrink-0" />
+                <span>{currentUser.accessLevel?.toUpperCase() || 'DEVELOPER'}</span>
               </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/40">
+              <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/40">
                 <KeyRound className="w-3.5 h-3.5" />
                 <span>AUTH: {currentUser.email}</span>
               </span>
             </div>
 
-            <h1 className="text-xl sm:text-2xl font-bold font-display tracking-tight flex items-center gap-2.5">
-              <span>User Management &amp; Access Control Matrix</span>
+            <h1 className="text-lg sm:text-xl md:text-2xl font-bold font-display tracking-tight break-words">
+              User Management &amp; Access Control Matrix
             </h1>
 
-            <p className="text-xs text-slate-400 max-w-3xl leading-relaxed">
-              Klik baris personel mana pun atau tombol{' '}
+            <p className="text-[11px] md:text-xs text-slate-400 max-w-3xl leading-relaxed">
+              Klik baris personel atau tombol{' '}
               <strong className="text-[#00B4D8]">&ldquo;Manage User&rdquo;</strong> untuk
-              membuka <strong>Detailed Edit Modal</strong> (Role &amp; Division, Supervisor,
-              Team Members Assignment, dan Custom Attendance Viewers).
+              mengatur Role, Divisi, Supervisor, Ruangan, dan Hak Akses Absensi.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             <button
               type="button"
               onClick={handleOpenModal}
               data-testid="add-google-workspace-account-btn"
-              className="px-4 py-2.5 rounded-xl text-xs font-mono font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 transition-colors flex items-center gap-2 shadow-lg shadow-amber-500/10 cursor-pointer"
+              className="w-full lg:w-auto px-3.5 md:px-4 py-2 md:py-2.5 rounded-xl text-xs font-mono font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 transition-colors flex items-center justify-center gap-2 shadow-lg shadow-amber-500/10 cursor-pointer"
             >
               <UserPlus className="w-4 h-4 shrink-0" />
-              <span>Add/Register New Google Workspace Account</span>
+              <span className="md:hidden">Add Workspace Account</span>
+              <span className="hidden md:inline">Add/Register New Google Workspace Account</span>
             </button>
           </div>
         </div>
 
-        {/* Summary Strip */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-5 pt-4 border-t border-slate-700/40 font-mono">
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400">
-                Total Personnel DB
+        {/* Summary Strip (Compact 2x2 Grid on Mobile < 768px, 4-Column on Desktop) */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 md:gap-3 mt-3.5 md:mt-5 pt-3 md:pt-4 border-t border-slate-700/40 font-mono">
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[9px] md:text-[10px] uppercase tracking-wider text-slate-400 truncate">
+                Total Personnel
               </p>
               <p
                 data-testid="dev-total-accounts-count"
-                className="text-xl font-bold text-white mt-0.5 tabular-nums"
+                className="text-base md:text-xl font-bold text-white mt-0.5 tabular-nums truncate"
               >
-                {staffList.length} Accounts
+                {staffList.length} Akun
               </p>
             </div>
-            <Database className="w-5 h-5 text-[#00B4D8]" />
+            <Database className="w-4 h-4 md:w-5 md:h-5 text-[#00B4D8] shrink-0" />
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400">
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[9px] md:text-[10px] uppercase tracking-wider text-slate-400 truncate">
                 Active Accounts
               </p>
               <p
                 data-testid="dev-active-accounts-count"
-                className="text-xl font-bold text-emerald-400 mt-0.5 tabular-nums"
+                className="text-base md:text-xl font-bold text-emerald-400 mt-0.5 tabular-nums truncate"
               >
                 {activeCount} Active
               </p>
             </div>
-            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            <CheckCircle2 className="w-4 h-4 md:w-5 md:h-5 text-emerald-400 shrink-0" />
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400">
-                Suspended / Deactivated
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[9px] md:text-[10px] uppercase tracking-wider text-slate-400 truncate">
+                Suspended
               </p>
               <p
                 data-testid="dev-suspended-accounts-count"
-                className="text-xl font-bold text-rose-400 mt-0.5 tabular-nums"
+                className="text-base md:text-xl font-bold text-rose-400 mt-0.5 tabular-nums truncate"
               >
-                {suspendedCount} Suspended
+                {suspendedCount} Susp.
               </p>
             </div>
-            <Ban className="w-5 h-5 text-rose-400" />
+            <Ban className="w-4 h-4 md:w-5 md:h-5 text-rose-400 shrink-0" />
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400">
-                Root Session Owner
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[9px] md:text-[10px] uppercase tracking-wider text-slate-400 truncate">
+                Root Session
               </p>
-              <p className="text-xs font-bold text-amber-400 mt-1 truncate">
-                {currentUser.name} ({currentUser.role})
+              <p className="text-[11px] md:text-xs font-bold text-amber-400 mt-1 truncate">
+                {currentUser.name}
               </p>
             </div>
-            <Cpu className="w-5 h-5 text-amber-400" />
+            <Cpu className="w-4 h-4 md:w-5 md:h-5 text-amber-400 shrink-0" />
           </div>
         </div>
       </div>
 
       {/* Simplified User Management Table (No Inline Dropdowns — Clickable Rows + "Manage User" Button) */}
-      <div className={`p-4 sm:p-6 rounded-2xl ${surfacePanel} space-y-4`}>
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div>
-            <h2 className="text-base font-bold font-display flex items-center gap-2">
-              <SlidersHorizontal className="w-4 h-4 text-[#00B4D8]" />
-              <span>Simplified Personnel Directory &amp; Access Matrix</span>
+      <div className={`p-3.5 sm:p-5 md:p-6 rounded-2xl ${surfacePanel} space-y-3 md:space-y-4`}>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2.5 md:gap-3">
+          <div className="min-w-0">
+            <h2 className="text-sm md:text-base font-bold font-display flex items-center gap-2">
+              <SlidersHorizontal className="w-4 h-4 text-[#00B4D8] shrink-0" />
+              <span className="truncate">Personnel Directory &amp; Access Matrix</span>
             </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Tabel bebas clutter tanpa dropdown inline. Klik baris atau tombol{' '}
-              <strong className="text-[#00B4D8]">Manage User</strong> untuk mengatur Role,
-              Divisi, Supervisor, Anggota Tim, dan Custom Attendance Viewers.
+            <p className="text-[11px] md:text-xs text-slate-400 mt-0.5">
+              Klik baris atau tombol <strong className="text-[#00B4D8]">Manage User</strong> untuk
+              mengatur Role, Divisi, Supervisor, dan Ruangan.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="relative">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 md:gap-2.5 w-full md:w-auto">
+            <div className="relative flex-1 sm:flex-none">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
@@ -560,7 +568,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Cari nama, email, supervisor..."
-                className={`pl-8 pr-3 py-1.5 rounded-lg text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                className={`w-full sm:w-56 pl-8 pr-3 py-1.5 rounded-lg text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
                   isDark
                     ? 'bg-slate-950 border-slate-700 text-white'
                     : 'bg-white border-slate-300 text-slate-900'
@@ -568,13 +576,13 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
               />
             </div>
 
-            <div className="inline-flex rounded-lg border border-slate-700 p-0.5 bg-slate-950 text-xs font-mono">
+            <div className="grid grid-cols-3 sm:inline-flex rounded-lg border border-slate-700 p-0.5 bg-slate-950 text-xs font-mono">
               {(['ALL', 'ACTIVE', 'SUSPENDED'] as const).map((status) => (
                 <button
                   key={status}
                   type="button"
                   onClick={() => setStatusFilter(status)}
-                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                  className={`px-2 md:px-2.5 py-1 rounded-md text-[10px] md:text-[11px] font-semibold transition-colors text-center ${
                     statusFilter === status
                       ? 'bg-[#00B4D8] text-slate-950'
                       : 'text-slate-400 hover:text-white'
@@ -652,7 +660,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <p className="font-bold truncate">{person.name}</p>
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-[#00B4D8]">
-                              {person.branch}
+                              {formatBranchDisplay(person.branch)}
                             </span>
                             {isDevAccount && (
                               <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40">
@@ -988,7 +996,7 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({
                     >
                       {VIRTUAL_OFFICE_ROOMS.map((rm) => (
                         <option key={rm.roomName} value={rm.roomName}>
-                          {rm.roomName}
+                          {formatRoomDisplayName(rm.roomName)}
                         </option>
                       ))}
                     </select>

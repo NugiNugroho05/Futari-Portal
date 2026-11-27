@@ -383,18 +383,21 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
-      className="space-y-6"
+      className="space-y-3.5 md:space-y-6"
     >
       {/* Top Header & Multi-Type Filter Controls */}
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 md:gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold font-display">
+          <h1 className="text-lg sm:text-xl md:text-2xl font-bold font-display">
             Calendar
           </h1>
         </div>
 
-        {/* Multi-Type Filter Pills */}
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Multi-Type Filter Pills (Horizontal Scrollable Row on Mobile < 768px) */}
+        <div
+          data-testid="calendar-filter-pills"
+          className="flex items-center gap-1.5 md:gap-2 overflow-x-auto no-scrollbar flex-nowrap lg:flex-wrap pb-0.5 lg:pb-0"
+        >
           {(
             [
               { key: 'ALL', label: 'Semua Jadwal' },
@@ -402,7 +405,7 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
               { key: 'Event Kantor', label: 'Event Kantor' },
               {
                 key: 'Booking Mobil Operasional',
-                label: 'Booking Mobil Operasional',
+                label: 'Booking Mobil',
               },
               {
                 key: 'Task Deadline',
@@ -415,7 +418,7 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
               type="button"
               data-testid={`calendar-filter-${tab.key}`}
               onClick={() => setTypeFilter(tab.key)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border cursor-pointer ${
+              className={`px-2.5 md:px-3 py-1.5 rounded-xl text-[11px] md:text-xs font-semibold transition-all border cursor-pointer shrink-0 whitespace-nowrap ${
                 typeFilter === tab.key
                   ? 'bg-gradient-to-r from-[#0277BD] to-[#00B4D8] text-white border-transparent shadow-sm'
                   : isDark
@@ -429,47 +432,49 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 md:gap-6">
         {/* Left 8 Columns: Monthly Calendar Grid + Selected Date Summary */}
-        <div className="lg:col-span-8 space-y-6">
-          <div className={`p-4 sm:p-6 rounded-2xl border ${surfaceCard}`}>
+        <div className="lg:col-span-8 space-y-3.5 md:space-y-6">
+          <div className={`p-3 sm:p-4 md:p-6 rounded-2xl border ${surfaceCard}`}>
             {/* Calendar Month Navigation & Legend */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#0277BD] to-[#00B4D8] flex items-center justify-center text-white shadow-sm shrink-0">
-                  <CalendarIcon className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-base sm:text-lg font-bold font-display">
-                    {MONTH_NAMES_ID[viewMonth]} {viewYear}
-                  </h2>
-                  <div className="flex flex-wrap items-center gap-3 text-[11px] mt-0.5">
-                    <span className="inline-flex items-center gap-1.5 text-amber-400 font-medium">
-                      <span className="w-2 h-2 rounded-full bg-amber-400" />
-                      Cuti Karyawan
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-[#00B4D8] font-medium">
-                      <span className="w-2 h-2 rounded-full bg-[#00B4D8]" />
-                      Event Kantor
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-emerald-400 font-medium">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                      Booking Mobil
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-purple-400 font-medium">
-                      <span className="w-2 h-2 rounded-full bg-purple-400" />
-                      Deadline Task &amp; Pekerjaan
-                    </span>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 md:gap-3 mb-3 md:mb-5">
+              <div className="flex items-center justify-between sm:justify-start gap-2.5 md:gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 md:w-10 md:h-10 rounded-xl bg-gradient-to-br from-[#0277BD] to-[#00B4D8] flex items-center justify-center text-white shadow-sm shrink-0">
+                    <CalendarIcon className="w-4 h-4 md:w-5 md:h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-sm sm:text-base md:text-lg font-bold font-display truncate">
+                      {MONTH_NAMES_ID[viewMonth]} {viewYear}
+                    </h2>
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] md:text-[11px] mt-0.5">
+                      <span className="inline-flex items-center gap-1 text-amber-400 font-medium">
+                        <span className="w-1.5 h-1.5 md:w-2 md:h-2 rounded-full bg-amber-400" />
+                        Cuti
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-[#00B4D8] font-medium">
+                        <span className="w-1.5 h-1.5 md:w-2 md:h-2 rounded-full bg-[#00B4D8]" />
+                        Event
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                        <span className="w-1.5 h-1.5 md:w-2 md:h-2 rounded-full bg-emerald-400" />
+                        Mobil
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-purple-400 font-medium">
+                        <span className="w-1.5 h-1.5 md:w-2 md:h-2 rounded-full bg-purple-400" />
+                        Task
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 self-end sm:self-auto">
+              <div className="flex items-center justify-end gap-1.5 md:gap-2">
                 <button
                   type="button"
                   onClick={handlePrevMonth}
                   aria-label="Bulan Sebelumnya"
-                  className={`p-2 rounded-lg border transition-colors ${
+                  className={`p-1.5 md:p-2 rounded-lg border transition-colors ${
                     isDark
                       ? 'border-slate-800 hover:bg-slate-800 text-slate-200'
                       : 'border-slate-200 hover:bg-slate-100 text-slate-700'
@@ -484,7 +489,7 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
                     setViewMonth(todayDate.getMonth());
                     setSelectedDayStr(todayDateStr);
                   }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
+                  className={`px-2.5 md:px-3 py-1 md:py-1.5 rounded-lg text-[11px] md:text-xs font-semibold border ${
                     isDark
                       ? 'border-slate-800 hover:bg-slate-800 text-slate-200'
                       : 'border-slate-200 hover:bg-slate-100 text-slate-700'
@@ -496,7 +501,7 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
                   type="button"
                   onClick={handleNextMonth}
                   aria-label="Bulan Berikutnya"
-                  className={`p-2 rounded-lg border transition-colors ${
+                  className={`p-1.5 md:p-2 rounded-lg border transition-colors ${
                     isDark
                       ? 'border-slate-800 hover:bg-slate-800 text-slate-200'
                       : 'border-slate-200 hover:bg-slate-100 text-slate-700'
@@ -508,18 +513,18 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
             </div>
 
             {/* Day Headers */}
-            <div className="grid grid-cols-7 gap-1 sm:gap-1.5 mb-2">
+            <div className="grid grid-cols-7 gap-1 sm:gap-1.5 mb-1.5 md:mb-2">
               {DAY_HEADERS.map((d) => (
                 <div
                   key={d}
-                  className={`text-center text-[11px] font-bold uppercase tracking-wider py-1.5 ${mutedText}`}
+                  className={`text-center text-[10px] md:text-[11px] font-bold uppercase tracking-wider py-1 md:py-1.5 ${mutedText}`}
                 >
                   {d}
                 </div>
               ))}
             </div>
 
-            {/* 7-Column Calendar Cells (Click to Open Day View) */}
+            {/* 7-Column Calendar Cells (Compact Height on Mobile < 768px so full month + agenda fit cleanly) */}
             <div
               data-testid="leave-calendar-grid"
               className="grid grid-cols-7 gap-1 sm:gap-1.5"
@@ -551,7 +556,7 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
                     data-testid={`calendar-day-${cell.dateStr}`}
                     aria-label={`Buka Day View tanggal ${cell.dateStr}`}
                     onClick={() => handleSelectDayOnCalendar(cell.dateStr)}
-                    className={`min-h-[92px] sm:min-h-[112px] p-1.5 sm:p-2 rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer ${
+                    className={`min-h-[48px] sm:min-h-[84px] md:min-h-[112px] p-1 sm:p-1.5 md:p-2 rounded-lg md:rounded-xl border text-left flex flex-col justify-between transition-all cursor-pointer ${
                       isSelected
                         ? 'border-[#00B4D8] ring-2 ring-[#00B4D8]/40 bg-[#00B4D8]/10'
                         : cell.isToday
@@ -568,13 +573,13 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
                     }`}
                   >
                     <div className="flex items-center justify-between w-full">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1">
                         <span
-                          className={`text-xs font-mono font-bold ${
+                          className={`text-[11px] md:text-xs font-mono font-bold ${
                             isSelected
-                              ? 'px-1.5 py-0.5 rounded bg-[#00B4D8] text-slate-950'
+                              ? 'px-1 md:px-1.5 py-0.5 rounded bg-[#00B4D8] text-slate-950'
                               : cell.isToday
-                              ? 'px-1.5 py-0.5 rounded bg-[#0277BD] text-white'
+                              ? 'px-1 md:px-1.5 py-0.5 rounded bg-[#0277BD] text-white'
                               : ''
                           }`}
                         >
@@ -596,7 +601,29 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
                       )}
                     </div>
 
-                    <div className="mt-1 space-y-1 w-full overflow-hidden">
+                    {/* Mobile Compact Event Indicator Dots (< 640px) */}
+                    {(visibleLeaves.length > 0 ||
+                      visibleOfficeEvents.length > 0 ||
+                      visibleCarBookings.length > 0 ||
+                      visibleDeadlineTasks.length > 0) && (
+                      <div className="sm:hidden flex items-center gap-0.5 flex-wrap mt-1">
+                        {visibleLeaves.length > 0 && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        )}
+                        {visibleOfficeEvents.length > 0 && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#00B4D8]" />
+                        )}
+                        {visibleCarBookings.length > 0 && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                        )}
+                        {visibleDeadlineTasks.length > 0 && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                        )}
+                      </div>
+                    )}
+
+                    {/* Full Event Badges on Tablet & Desktop (>= 640px) */}
+                    <div className="hidden sm:block mt-1 space-y-1 w-full overflow-hidden">
                       {/* 1. Cuti Karyawan Badges */}
                       {visibleLeaves.slice(0, 1).map((lv) => (
                         <div
@@ -659,11 +686,11 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
           {/* Persistent Day Summary & Synced Task Deadlines Panel */}
           <div
             data-testid="day-view-panel"
-            className={`p-5 sm:p-6 rounded-2xl border ${surfaceCard} space-y-5`}
+            className={`p-3.5 sm:p-5 md:p-6 rounded-2xl border ${surfaceCard} space-y-3 md:space-y-5`}
           >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/40 pb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 md:gap-3 border-b border-slate-700/40 pb-3 md:pb-4">
               <div>
-                <h3 className="text-base sm:text-lg font-bold font-display">
+                <h3 className="text-sm sm:text-base md:text-lg font-bold font-display">
                   Agenda Details: {selectedDayStr}
                 </h3>
               </div>
@@ -673,16 +700,16 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
                   type="button"
                   data-testid="open-tasks-tab-from-calendar-btn"
                   onClick={onOpenTasksTab}
-                  className="px-3.5 py-2 rounded-xl text-xs font-semibold border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 flex items-center gap-2 cursor-pointer shrink-0"
+                  className="px-3 md:px-3.5 py-1.5 md:py-2 rounded-xl text-[11px] md:text-xs font-semibold border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 flex items-center justify-center gap-1.5 md:gap-2 cursor-pointer shrink-0"
                 >
-                  <CheckSquare className="w-4 h-4" />
-                  <span>Kelola di Tab Task &amp; Pekerjaan</span>
+                  <CheckSquare className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                  <span>Kelola di Tab Jobdesk</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
               {/* Cuti Card */}
               <div
                 className={`p-3.5 rounded-xl border ${
@@ -839,11 +866,11 @@ export const LeaveCalendarTab: React.FC<LeaveCalendarTabProps> = ({
         </div>
 
         {/* Right 4 Columns: Multi-Type Entry Form + Operational Car Bookings Log */}
-        <div className="lg:col-span-4 space-y-6">
+        <div className="lg:col-span-4 space-y-3.5 md:space-y-6">
           <form
             onSubmit={handleCreateEntry}
             data-testid="multi-type-calendar-form"
-            className={`p-5 rounded-2xl border ${surfaceCard} space-y-4`}
+            className={`p-3.5 md:p-5 rounded-2xl border ${surfaceCard} space-y-3 md:space-y-4`}
           >
             <div className="flex items-center gap-2 text-[#00B4D8]">
               <PlusCircle className="w-4 h-4" />

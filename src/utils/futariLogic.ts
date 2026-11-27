@@ -48,9 +48,15 @@ export function formatBranchDisplay(branch?: string | null): string {
   return 'JKT';
 }
 
+export function isJawaRoomName(roomName?: string | null): boolean {
+  if (!roomName) return false;
+  const lower = roomName.trim().toLowerCase();
+  return lower.includes('bandung') || lower.includes('jawa');
+}
+
 export function formatRoomDisplayName(roomName?: string | null): string {
   if (!roomName) return 'Ruangan Creative/Design';
-  if (roomName === 'Cabang Bandung') return 'Cabang Jawa';
+  if (isJawaRoomName(roomName)) return 'Cabang Jawa';
   return roomName;
 }
 
@@ -63,7 +69,8 @@ export type VirtualOfficeRoomName =
   | 'Ruangan Production & HRD'
   | 'Ruangan Finance'
   | 'Ruangan Operational'
-  | 'Cabang Bandung';
+  | 'Cabang Bandung'
+  | 'Cabang Jawa';
 
 export type AccessLevelType = 'standard' | 'executive' | 'developer';
 
@@ -106,7 +113,7 @@ export interface StaffMemberRecord {
   division: DivisionType;
   divisionLabel: string;
   branch: BranchType;
-  location?: 'Jakarta' | 'Bandung' | 'JKT';
+  location?: 'Jakarta' | 'Bandung' | 'JKT' | 'Jawa';
   supervisor: string;
   workMode: WorkModeType;
   breakStatus?: BreakModeType;
@@ -313,7 +320,11 @@ export interface ChatMessageItem {
   branch: BranchType;
   initials: string;
   avatarColor: string;
-  channel: 'Futari General Chat' | 'Event Operations & Venue' | 'Bandung Creative Hub';
+  channel:
+    | 'Futari General Chat'
+    | 'Event Operations & Venue'
+    | 'Jawa Creative Hub'
+    | 'Bandung Creative Hub';
   message: string;
   timestamp: string;
   isAnnouncement?: boolean;
@@ -979,10 +990,14 @@ export function groupActiveWfoByRoom(
   staffList: StaffMemberRecord[]
 ): VirtualOfficeRoomGroup[] {
   const wfoOnly = filterActiveWfoPersonnel(staffList);
+  const matchesRoom = (staffRoom: string | undefined, canonicalRoom: VirtualOfficeRoomName) => {
+    const norm = normalizeVirtualOfficeRoomName(staffRoom) || staffRoom;
+    return norm === canonicalRoom;
+  };
   return VIRTUAL_OFFICE_ROOMS.map((roomDef) => {
-    const allInRoom = staffList.filter((s) => s.roomName === roomDef.roomName);
-    const activeWfoMembers = wfoOnly.filter(
-      (s) => s.roomName === roomDef.roomName
+    const allInRoom = staffList.filter((s) => matchesRoom(s.roomName, roomDef.roomName));
+    const activeWfoMembers = wfoOnly.filter((s) =>
+      matchesRoom(s.roomName, roomDef.roomName)
     );
     return {
       ...roomDef,
@@ -1508,7 +1523,12 @@ export function buildTeamDashboardExportLogs(
   staffList: StaffMemberRecord[] = INITIAL_FUTARI_STAFF,
   selectedMemberFilterId: string = 'ALL_VISIBLE',
   referenceDate: string = toLocalDateKey(new Date()),
-  explicitlyVisibleStaff?: StaffMemberRecord[]
+  explicitlyVisibleStaff?: StaffMemberRecord[],
+  options?: {
+    startDate?: string;
+    endDate?: string;
+    synthesizeMissing?: boolean;
+  }
 ): AttendanceRecord[] {
   const rbacAllowedStaff = getTeamDashboardPersonnel(viewer, staffList);
   const rbacAllowedIds = new Set(rbacAllowedStaff.map((s) => s.staffId));
@@ -1528,11 +1548,21 @@ export function buildTeamDashboardExportLogs(
       .map((s) => (s.email || '').trim().toLowerCase())
       .filter(Boolean)
   );
-  const matchingActualLogs = allLogs.filter(
+  const dateScopedLogs =
+    options?.startDate && options?.endDate
+      ? filterAttendanceLogsByDateRange(allLogs, options.startDate, options.endDate)
+      : allLogs;
+
+  const matchingActualLogs = dateScopedLogs.filter(
     (l) =>
       allowedIds.has(l.staffId) ||
       (l.email && allowedEmails.has(l.email.trim().toLowerCase()))
   );
+
+  const shouldSynthesize = options?.synthesizeMissing !== false;
+  if (!shouldSynthesize) {
+    return matchingActualLogs;
+  }
 
   const logsByStaff = new Set(matchingActualLogs.map((l) => l.staffId));
   const logsByEmail = new Set(
@@ -1577,8 +1607,8 @@ export function buildTeamDashboardExportLogs(
       overtimePay: 0,
       overtimeNote: `Status Kehadiran Tim (${member.workMode}) — Supervisor: ${member.supervisor}`,
       locationWatermark:
-        member.branch === 'Bandung'
-          ? 'Bandung Creative Hub (Jl. Braga)'
+        member.branch === 'Bandung' || member.branch === 'Jawa'
+          ? 'Regional Hub Jawa'
           : FUTARI_HQ_ADDRESS,
       status: 'completed',
     });
@@ -2106,6 +2136,159 @@ export function getActivePayrollCycle(referenceDate: Date = new Date()): {
     endDate: iso(end),
     label: `${fmt(start)} – ${fmt(end)}`,
   };
+}
+
+export interface PayrollCycleOption {
+  id: string;
+  startDate: string;
+  endDate: string;
+  label: string;
+  isCurrent: boolean;
+}
+
+/**
+ * Generates the last `count` payroll cycles (default 12), starting from the active cycle
+ * (`26 [Month] – 25 [Next Month]`) going backwards month by month.
+ */
+export function getRecentPayrollCycles(
+  referenceDate: Date = new Date(),
+  count: number = 12
+): PayrollCycleOption[] {
+  const year = referenceDate.getFullYear();
+  const month = referenceDate.getMonth();
+  const day = referenceDate.getDate();
+
+  const baseStartYear = day >= 26 ? year : year;
+  const baseStartMonth = day >= 26 ? month : month - 1;
+
+  const fmt = (d: Date) =>
+    d.toLocaleDateString('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+
+  const iso = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dt = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dt}`;
+  };
+
+  const cycles: PayrollCycleOption[] = [];
+  const safeCount = Math.max(1, Math.min(36, Math.floor(count)));
+
+  for (let i = 0; i < safeCount; i += 1) {
+    const start = new Date(baseStartYear, baseStartMonth - i, 26);
+    const end = new Date(baseStartYear, baseStartMonth - i + 1, 25);
+    const startDate = iso(start);
+    const endDate = iso(end);
+    cycles.push({
+      id: `${startDate}_${endDate}`,
+      startDate,
+      endDate,
+      label: `${fmt(start)} – ${fmt(end)}`,
+      isCurrent: i === 0,
+    });
+  }
+
+  return cycles;
+}
+
+/**
+ * Formats an ISO YYYY-MM-DD date pair into a clean Indonesian period label for exports and headers.
+ */
+export function formatCustomDateRangeLabel(
+  startDate: string,
+  endDate: string
+): string {
+  const parseLocal = (isoStr: string) => {
+    const [y, m, d] = isoStr.split('-').map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d);
+  };
+  const s = parseLocal(startDate);
+  const e = parseLocal(endDate);
+  if (!s || !e) return `${startDate} – ${endDate}`;
+  const fmt = (dt: Date) =>
+    dt.toLocaleDateString('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+  return `${fmt(s)} – ${fmt(e)}`;
+}
+
+/**
+ * Normalizes a log date string to YYYY-MM-DD and checks if it falls within [startDate, endDate] inclusive.
+ */
+export function filterAttendanceLogsByDateRange(
+  logs: AttendanceRecord[],
+  startDate?: string | null,
+  endDate?: string | null
+): AttendanceRecord[] {
+  if (!startDate && !endDate) return logs;
+  const minDate = startDate && endDate && startDate > endDate ? endDate : startDate || '';
+  const maxDate = startDate && endDate && startDate > endDate ? startDate : endDate || '';
+
+  return logs.filter((log) => {
+    const raw = (log.date || '').trim();
+    if (!raw) return false;
+    const isoDay = /^\d{4}-\d{2}-\d{2}/.test(raw)
+      ? raw.slice(0, 10)
+      : (() => {
+          const parsed = new Date(raw);
+          return Number.isNaN(parsed.getTime()) ? '' : toJakartaDateKey(parsed);
+        })();
+    if (!isoDay) return false;
+    if (minDate && isoDay < minDate) return false;
+    if (maxDate && isoDay > maxDate) return false;
+    return true;
+  });
+}
+
+/**
+ * Determines whether the user can select historical payroll cycles and custom date ranges
+ * (Management, Executive, Finance, HR/HRD, Dev/Digital, PM/PIC/Lead, or any Direct Supervisor).
+ */
+export function canSelectHistoricalPayrollCycle(
+  user: StaffMemberRecord | null | undefined,
+  staffList: StaffMemberRecord[] = INITIAL_FUTARI_STAFF
+): boolean {
+  if (!user) return false;
+  if (canViewAllAttendance(user)) return true;
+
+  const roleNorm = (user.role || '').trim().toLowerCase();
+  const divNorm = String(user.division || '').trim().toLowerCase();
+  const managementKeywords = [
+    'manager',
+    'pm',
+    'supervisor',
+    'head',
+    'lead',
+    'leader',
+    'pic',
+    'director',
+    'founder',
+    'ceo',
+    'hr',
+    'hrd',
+    'finance',
+    'admin',
+    'operational',
+    'operasional',
+    'dev',
+    'digital',
+  ];
+  if (
+    managementKeywords.some(
+      (kw) => roleNorm.includes(kw) || divNorm.includes(kw)
+    )
+  ) {
+    return true;
+  }
+
+  return getDirectReportsForSupervisor(staffList, user).length > 0;
 }
 
 /**
@@ -2981,8 +3164,9 @@ export function computeRoomGridDeskCoords(
   slotIndexInRoom: number,
   totalInRoom: number = 4
 ): { x: number; z: number } {
+  const canonicalRoom = normalizeVirtualOfficeRoomName(roomName) || roomName;
   const roomDef =
-    VIRTUAL_OFFICE_ROOMS.find((r) => r.roomName === roomName) ||
+    VIRTUAL_OFFICE_ROOMS.find((r) => r.roomName === canonicalRoom) ||
     VIRTUAL_OFFICE_ROOMS[0];
   const { centerX, centerZ, width, depth } = roomDef.floorBounds;
 
@@ -3031,7 +3215,10 @@ export function assignRoomGridCoordinatesToStaffList(
   const inactiveByRoom = new Map<VirtualOfficeRoomName, string[]>();
 
   for (const person of staffList) {
-    const room = person.roomName || 'Ruangan Creative/Design';
+    const room =
+      normalizeVirtualOfficeRoomName(person.roomName) ||
+      person.roomName ||
+      'Ruangan Creative/Design';
     if (person.workMode === 'WFO' && !person.isSuspended) {
       const arr = activeWfoByRoom.get(room) || [];
       arr.push(person.staffId);
@@ -3044,7 +3231,10 @@ export function assignRoomGridCoordinatesToStaffList(
   }
 
   return staffList.map((person) => {
-    const room = person.roomName || 'Ruangan Creative/Design';
+    const room =
+      normalizeVirtualOfficeRoomName(person.roomName) ||
+      person.roomName ||
+      'Ruangan Creative/Design';
     const wfoIds = activeWfoByRoom.get(room) || [];
     const inactiveIds = inactiveByRoom.get(room) || [];
 
@@ -3101,9 +3291,19 @@ export function updateOwnProfileSelfService(
       updates.supervisor_email !== undefined
         ? updates.supervisor_email
         : staff.supervisor_email;
-    const nextRoomName =
+    const rawNextRoom =
       updates.roomName !== undefined ? updates.roomName : staff.roomName;
+    const nextRoomName: VirtualOfficeRoomName =
+      normalizeVirtualOfficeRoomName(rawNextRoom) || rawNextRoom;
     const roomChanged = nextRoomName !== staff.roomName;
+    const nextBranch: BranchType =
+      updates.branch !== undefined
+        ? updates.branch
+        : roomChanged
+        ? isJawaRoomName(nextRoomName)
+          ? 'Jawa'
+          : 'JKT'
+        : staff.branch;
     const nextDeskCoords = roomChanged
       ? computeDeskCoordsForRoom(nextRoomName, idx + 3)
       : staff.deskCoords;
@@ -3137,6 +3337,8 @@ export function updateOwnProfileSelfService(
       password: nextPassword,
       supervisor: nextSupervisor,
       supervisor_email: nextSupervisorEmail,
+      branch: nextBranch,
+      location: nextBranch === 'Bandung' || nextBranch === 'Jawa' ? 'Jawa' : 'JKT',
       roomName: nextRoomName,
       deskZone: nextRoomName,
       deskCoords: nextDeskCoords,
@@ -3231,8 +3433,19 @@ export function superadminUpdateAnyProfile(
       updates.division !== undefined
         ? (DIVISION_LABEL_MAP[nextDivision as keyof typeof DIVISION_LABEL_MAP] || updates.division)
         : staff.divisionLabel;
+    const rawNextRoom =
+      updates.roomName !== undefined ? updates.roomName : staff.roomName;
+    const nextRoomName: VirtualOfficeRoomName =
+      normalizeVirtualOfficeRoomName(rawNextRoom) || rawNextRoom;
+    const roomChanged = nextRoomName !== staff.roomName;
     const nextBranch =
-      updates.branch !== undefined ? updates.branch : staff.branch;
+      updates.branch !== undefined
+        ? updates.branch
+        : roomChanged
+        ? isJawaRoomName(nextRoomName)
+          ? 'Jawa'
+          : 'JKT'
+        : staff.branch;
     const nextSupervisor =
       updates.supervisor !== undefined && updates.supervisor.trim()
         ? updates.supervisor.trim()
@@ -3241,9 +3454,6 @@ export function superadminUpdateAnyProfile(
       updates.supervisor_email !== undefined
         ? updates.supervisor_email
         : staff.supervisor_email;
-    const nextRoomName =
-      updates.roomName !== undefined ? updates.roomName : staff.roomName;
-    const roomChanged = nextRoomName !== staff.roomName;
     const nextDeskCoords = roomChanged
       ? computeDeskCoordsForRoom(nextRoomName, idx + 5)
       : staff.deskCoords;
@@ -3601,7 +3811,7 @@ export function normalizeVirtualOfficeRoomName(
   if (lower.includes('operational') || lower.includes('operasional')) {
     return 'Ruangan Operational';
   }
-  if (lower.includes('bandung')) {
+  if (lower.includes('bandung') || lower.includes('jawa')) {
     return 'Cabang Bandung';
   }
   return undefined;
@@ -3850,7 +4060,7 @@ export function mapSupabasePersonnelToStaffRecord(
 
   const branch: BranchType =
     meta.branch ||
-    (roomName === 'Cabang Bandung' ? 'Bandung' : defaultBranch);
+    (isJawaRoomName(roomName) ? 'Jawa' : defaultBranch);
 
   const idStr = String(row.id ?? `sup_${seedIndex + 1}`);
   const isDev =
@@ -5667,7 +5877,8 @@ export function syncAttendanceLogsWithLeave(
   logs: AttendanceRecord[],
   leaves: LeaveRecordItem[],
   employee: StaffMemberRecord,
-  events?: CalendarEventItem[]
+  events?: CalendarEventItem[],
+  dateRange?: { startDate?: string; endDate?: string }
 ): AttendanceRecord[] {
   const empId = (employee.staffId || '').trim().toLowerCase();
   const empEmail = (employee.email || '').trim().toLowerCase();
@@ -5751,6 +5962,16 @@ export function syncAttendanceLogsWithLeave(
     const cur = new Date(start);
     while (cur <= end) {
       const dateStr = cur.toISOString().split('T')[0];
+
+      // Skip leave dates outside the explicitly requested payroll period / date range
+      if (dateRange?.startDate && dateStr < dateRange.startDate) {
+        cur.setDate(cur.getDate() + 1);
+        continue;
+      }
+      if (dateRange?.endDate && dateStr > dateRange.endDate) {
+        cur.setDate(cur.getDate() + 1);
+        continue;
+      }
 
       // Check if there is already an attendance log for this date
       const existingIdx = updatedLogs.findIndex((l) => l.date === dateStr);

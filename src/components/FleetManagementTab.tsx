@@ -14,6 +14,7 @@ import {
   Mail,
   AlertTriangle,
   RefreshCw,
+  ChevronDown,
 } from 'lucide-react';
 import {
   FleetVehicleItem,
@@ -136,6 +137,8 @@ export const FleetManagementTab: React.FC<FleetManagementTabProps> = ({
   const [bookingFormError, setBookingFormError] = useState<string>('');
   const [bookingSuccessMsg, setBookingSuccessMsg] = useState<string>('');
   const [isSubmittingBooking, setIsSubmittingBooking] =
+    useState<boolean>(false);
+  const [isMobileBookingFormOpen, setIsMobileBookingFormOpen] =
     useState<boolean>(false);
 
   // Edit Existing Vehicle Booking Schedule Modal State (Strictly for `dev` & `executive` roles)
@@ -403,6 +406,7 @@ export const FleetManagementTab: React.FC<FleetManagementTabProps> = ({
     try {
       await onBookVehicle(newBooking);
       setBookingPurpose('');
+      setIsMobileBookingFormOpen(false);
       setBookingSuccessMsg(
         `Booking kendaraan "${cleanVehicle}" (${formatBookingTimestamptzLabel(
           startIso
@@ -424,30 +428,62 @@ export const FleetManagementTab: React.FC<FleetManagementTabProps> = ({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
-      className="space-y-6"
+      className="space-y-3.5 md:space-y-6"
       data-testid="fleet-management-tab"
     >
-      {/* Header */}
-      <div className={`p-4 md:p-6 rounded-2xl border min-w-0 ${surfaceCard}`}>
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      {/* Header + Mobile Collapsible CTA */}
+      <div className={`p-3.5 md:p-6 rounded-2xl border min-w-0 ${surfaceCard}`}>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2.5 md:gap-4">
           <div className="min-w-0">
-            <h1 className="text-lg md:text-2xl font-bold font-display mt-1.5 break-words">
-              Manajemen Kendaraan &amp; Jadwal Booking Operasional
+            <h1 className="text-lg md:text-2xl font-bold font-display mt-0.5 md:mt-1.5 break-words">
+              Manajemen Kendaraan &amp; Jadwal Booking
             </h1>
-            <p className={`text-xs md:text-sm mt-1 break-words ${mutedText}`}>
+            <p className={`text-xs md:text-sm mt-0.5 md:mt-1 break-words ${mutedText}`}>
               Pemesanan kendaraan operasional Futari dan manajemen armada operasional.
             </p>
           </div>
+
+          {/* Mobile Primary CTA to expand/collapse Booking Form so Schedule List is immediately visible */}
+          <button
+            type="button"
+            data-testid="mobile-toggle-fleet-booking-form-btn"
+            onClick={() => setIsMobileBookingFormOpen((prev) => !prev)}
+            className="md:hidden w-full py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 shadow-md flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <PlusCircle className="w-4 h-4 shrink-0" />
+            <span>
+              {isMobileBookingFormOpen
+                ? 'Tutup Form Booking'
+                : '+ Buat Booking Kendaraan'}
+            </span>
+            <ChevronDown
+              className={`w-4 h-4 shrink-0 transition-transform ${
+                isMobileBookingFormOpen ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
         </div>
       </div>
 
+      {bookingSuccessMsg && !isMobileBookingFormOpen && (
+        <div
+          data-testid="fleet-booking-success-alert-mobile"
+          className="md:hidden p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-300 flex items-center gap-2"
+        >
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          <span>{bookingSuccessMsg}</span>
+        </div>
+      )}
+
       {/* =====================================================================
-          1. BOOKING INTERFACE: Form to Book a Vehicle
+          1. BOOKING INTERFACE: Collapsible on Mobile (< 768px), Always Visible on Desktop
          ===================================================================== */}
       <form
         onSubmit={handleBookVehicleSubmit}
         data-testid="fleet-booking-form"
-        className={`p-5 md:p-6 rounded-2xl border ${surfaceCard} space-y-4`}
+        className={`${
+          isMobileBookingFormOpen ? 'block' : 'hidden md:block'
+        } p-3.5 md:p-6 rounded-2xl border ${surfaceCard} space-y-3.5 md:space-y-4`}
       >
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-700/40 pb-3">
           <div className="flex items-center gap-2 text-[#00B4D8]">
@@ -606,7 +642,7 @@ export const FleetManagementTab: React.FC<FleetManagementTabProps> = ({
           2. SCHEDULE LIST / TIMELINE BELOW THE FORM (`vehicle_bookings`)
              WITH STRICT RBAC EDIT & DELETE (DEV & EXECUTIVE ONLY)
          ===================================================================== */}
-      <div className={`p-5 md:p-6 rounded-2xl border ${surfaceCard} space-y-4`}>
+      <div className={`p-3.5 md:p-6 rounded-2xl border ${surfaceCard} space-y-3 md:space-y-4`}>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-700/40 pb-3">
           <div>
             <h2 className="text-base font-bold font-display flex items-center gap-2 text-emerald-400">
@@ -735,7 +771,7 @@ export const FleetManagementTab: React.FC<FleetManagementTabProps> = ({
       {/* =====================================================================
           3. FLEET INVENTORY SECTION (Armada Operasional Futari)
          ===================================================================== */}
-      <div className={`p-5 md:p-6 rounded-2xl border ${surfaceCard} space-y-4`}>
+      <div className={`p-3.5 md:p-6 rounded-2xl border ${surfaceCard} space-y-3 md:space-y-4`}>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <h2 className="text-sm md:text-base font-bold font-display flex items-center gap-2">
             <Car className="w-4 h-4 text-[#00B4D8] shrink-0" />

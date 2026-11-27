@@ -133,20 +133,20 @@ export const SopManagementTab: React.FC<SopManagementTabProps> = ({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
-      className="space-y-6"
+      className="space-y-3.5 md:space-y-6"
       data-testid="sop-management-tab"
     >
       {/* Header & Strict RBAC Banner */}
-      <div className={`p-4 md:p-6 rounded-2xl border min-w-0 ${surfaceCard}`}>
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      <div className={`p-3.5 md:p-6 rounded-2xl border min-w-0 ${surfaceCard}`}>
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 md:gap-4">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8]">
-                SOP PERUSAHAAN · COMPANY STANDARD OPERATING PROCEDURES
+            <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
+              <span className="px-2 md:px-2.5 py-0.5 rounded-md text-[10px] md:text-[11px] font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8]">
+                SOP PERUSAHAAN
               </span>
               <span
                 data-testid="sop-rbac-badge"
-                className={`px-2.5 py-0.5 rounded-md text-[11px] font-semibold inline-flex items-center gap-1.5 border break-words whitespace-normal ${
+                className={`px-2 md:px-2.5 py-0.5 rounded-md text-[10px] md:text-[11px] font-semibold inline-flex items-center gap-1.5 border break-words whitespace-normal ${
                   canManage
                     ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                     : 'bg-slate-800 text-slate-300 border-slate-700'
@@ -156,28 +156,23 @@ export const SopManagementTab: React.FC<SopManagementTabProps> = ({
                   <>
                     <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
                     <span>
-                      Akses Editor Aktif ({currentUser.name} —{' '}
-                      {currentUser.division === 'Executive'
-                        ? 'Executive'
-                        : currentUser.role}
-                      )
+                      Editor ({currentUser.name})
                     </span>
                   </>
                 ) : (
                   <>
                     <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                     <span>
-                      Read-Only Mode ({currentUser.name} · {currentUser.role}) —
-                      Hanya Executive &amp; Digital yang Dapat Menambah/Edit SOP
+                      Read-Only ({currentUser.role})
                     </span>
                   </>
                 )}
               </span>
             </div>
-            <h1 className="text-lg md:text-2xl font-bold font-display mt-1.5 break-words">
-              SOP Perusahaan (Standard Operating Procedures Futari)
+            <h1 className="text-lg md:text-2xl font-bold font-display mt-1 md:mt-1.5 break-words">
+              SOP Perusahaan (Standard Operating Procedures)
             </h1>
-            <p className={`text-xs md:text-sm mt-1 break-words ${mutedText}`}>
+            <p className={`text-xs md:text-sm mt-0.5 md:mt-1 break-words ${mutedText}`}>
               Pedoman resmi operasional Jakarta HQ &amp; Jawa Hub.
               Seluruh personel wajib mematuhi SOP yang berlaku.
             </p>
@@ -190,7 +185,7 @@ export const SopManagementTab: React.FC<SopManagementTabProps> = ({
                 type="button"
                 data-testid="add-sop-btn"
                 onClick={handleOpenAddForm}
-                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-2 shadow-md cursor-pointer"
+                className="w-full md:w-auto px-4 py-2 md:py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center justify-center gap-2 shadow-md cursor-pointer"
               >
                 <PlusCircle className="w-4 h-4" />
                 <span>Tambah SOP Baru</span>
@@ -205,7 +200,7 @@ export const SopManagementTab: React.FC<SopManagementTabProps> = ({
         <form
           onSubmit={handleSubmitForm}
           data-testid="sop-editor-form"
-          className={`p-5 sm:p-6 rounded-2xl border-2 border-[#00B4D8]/60 space-y-4 ${surfaceCard}`}
+          className={`p-3.5 sm:p-5 md:p-6 rounded-2xl border-2 border-[#00B4D8]/60 space-y-3.5 md:space-y-4 ${surfaceCard}`}
         >
           <div className="flex items-center justify-between border-b border-slate-700/40 pb-3">
             <div className="flex items-center gap-2">
@@ -335,13 +330,13 @@ export const SopManagementTab: React.FC<SopManagementTabProps> = ({
       ) : (
         <div
           data-testid="sop-cards-grid"
-          className="grid grid-cols-1 md:grid-cols-2 gap-4"
+          className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4"
         >
           {sops.map((sop, idx) => (
             <div
               key={sop.id}
               data-testid={`sop-card-${sop.id}`}
-              className={`p-4 md:p-6 rounded-2xl border flex flex-col justify-between gap-4 transition-colors min-w-0 ${surfaceCard}`}
+              className={`p-3.5 md:p-6 rounded-2xl border flex flex-col justify-between gap-3 md:gap-4 transition-colors min-w-0 ${surfaceCard}`}
             >
             <div className="space-y-2.5 min-w-0">
               <div className="flex items-start justify-between gap-3">

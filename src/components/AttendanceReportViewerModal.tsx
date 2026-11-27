@@ -15,6 +15,7 @@ import {
   calculateRegularWorkingHours,
   calculateAttendanceExportTotals,
   getAttendanceJobDescription,
+  formatBranchDisplay,
 } from '../utils/futariLogic';
 
 interface AttendanceReportViewerModalProps {
@@ -210,7 +211,9 @@ export const AttendanceReportViewerModal: React.FC<AttendanceReportViewerModalPr
                 <div className="flex justify-between sm:justify-start sm:gap-3">
                   <span className="text-slate-500 w-36 shrink-0">Lokasi Cabang:</span>
                   <span className="font-semibold text-slate-800">
-                    {employee.branch === 'JKT' ? 'Jakarta (JKT)' : 'Bandung'}
+                    {formatBranchDisplay(employee.branch) === 'JKT'
+                      ? 'Jakarta (JKT)'
+                      : 'Jawa (Regional Hub Jawa)'}
                   </span>
                 </div>
                 <div className="flex justify-between sm:justify-start sm:gap-3">

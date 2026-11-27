@@ -14,18 +14,26 @@ import {
   X,
   Printer,
   Calendar,
+  RefreshCw,
+  ChevronDown,
 } from 'lucide-react';
 import {
   StaffMemberRecord,
   AttendanceRecord,
   LeaveRecordItem,
   CalendarEventItem,
+  PayrollCycleOption,
   canViewAllAttendance,
+  canSelectHistoricalPayrollCycle,
+  getRecentPayrollCycles,
+  formatCustomDateRangeLabel,
+  filterAttendanceLogsByDateRange,
   getTeamDashboardPersonnel,
   buildTeamDashboardExportLogs,
   calculateAttendanceExportTotals,
   calculateRegularWorkingHours,
   formatIDR,
+  formatRoomDisplayName,
   getGlassSurfaceClasses,
   COMPANY_DIVISIONS,
   syncAttendanceLogsWithLeave,
@@ -37,13 +45,32 @@ interface TeamAttendanceDashboardTabProps {
   staffList: StaffMemberRecord[];
   attendanceLogs: AttendanceRecord[];
   payrollCycleLabel: string;
+  payrollCycles?: PayrollCycleOption[];
+  selectedPeriodId?: string;
+  onSelectPeriodId?: (periodId: string) => void;
+  customStartDate?: string;
+  customEndDate?: string;
+  onChangeCustomStartDate?: (date: string) => void;
+  onChangeCustomEndDate?: (date: string) => void;
+  activePeriodRange?: {
+    startDate: string;
+    endDate: string;
+    label: string;
+    isCurrent: boolean;
+    isCustom?: boolean;
+  };
+  isLoadingPeriod?: boolean;
   onDownloadTeamPdf: (
     targetEmployee: StaffMemberRecord,
-    logsToExport: AttendanceRecord[]
+    logsToExport: AttendanceRecord[],
+    periodLabel?: string,
+    dateRange?: { startDate: string; endDate: string }
   ) => void;
   onDownloadTeamExcel: (
     targetEmployee: StaffMemberRecord,
-    logsToExport: AttendanceRecord[]
+    logsToExport: AttendanceRecord[],
+    periodLabel?: string,
+    dateRange?: { startDate: string; endDate: string }
   ) => void;
   isExporting: boolean;
   isDark: boolean;
@@ -56,6 +83,15 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
   staffList,
   attendanceLogs,
   payrollCycleLabel,
+  payrollCycles: externalPayrollCycles,
+  selectedPeriodId: externalSelectedPeriodId,
+  onSelectPeriodId,
+  customStartDate: externalCustomStartDate,
+  customEndDate: externalCustomEndDate,
+  onChangeCustomStartDate,
+  onChangeCustomEndDate,
+  activePeriodRange: externalActivePeriodRange,
+  isLoadingPeriod = false,
   onDownloadTeamPdf,
   onDownloadTeamExcel,
   isExporting,
@@ -67,6 +103,100 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [modeFilter, setModeFilter] = useState<'ALL' | 'WFO' | 'WFE' | 'OFFLINE'>('ALL');
   const [selectedDetailMember, setSelectedDetailMember] = useState<StaffMemberRecord | null>(null);
+  const [isMobileControlsOpen, setIsMobileControlsOpen] = useState<boolean>(false);
+
+  const fallbackCycles = useMemo(() => getRecentPayrollCycles(new Date(), 12), []);
+  const payrollCycles =
+    externalPayrollCycles && externalPayrollCycles.length > 0
+      ? externalPayrollCycles
+      : fallbackCycles;
+
+  const [localPeriodId, setLocalPeriodId] = useState<string>(
+    payrollCycles[0]?.id || ''
+  );
+  const [localCustomStart, setLocalCustomStart] = useState<string>(
+    payrollCycles[0]?.startDate || ''
+  );
+  const [localCustomEnd, setLocalCustomEnd] = useState<string>(
+    payrollCycles[0]?.endDate || ''
+  );
+
+  const selectedPeriodId =
+    externalSelectedPeriodId !== undefined
+      ? externalSelectedPeriodId
+      : localPeriodId;
+  const customStartDate =
+    externalCustomStartDate !== undefined
+      ? externalCustomStartDate
+      : localCustomStart;
+  const customEndDate =
+    externalCustomEndDate !== undefined
+      ? externalCustomEndDate
+      : localCustomEnd;
+
+  const handleChangePeriodId = (nextId: string) => {
+    if (onSelectPeriodId) {
+      onSelectPeriodId(nextId);
+    } else {
+      setLocalPeriodId(nextId);
+    }
+  };
+
+  const handleChangeCustomStart = (nextDate: string) => {
+    if (onChangeCustomStartDate) {
+      onChangeCustomStartDate(nextDate);
+    } else {
+      setLocalCustomStart(nextDate);
+    }
+  };
+
+  const handleChangeCustomEnd = (nextDate: string) => {
+    if (onChangeCustomEndDate) {
+      onChangeCustomEndDate(nextDate);
+    } else {
+      setLocalCustomEnd(nextDate);
+    }
+  };
+
+  const effectivePeriod = useMemo(() => {
+    if (externalActivePeriodRange) {
+      return externalActivePeriodRange;
+    }
+    if (selectedPeriodId === 'CUSTOM') {
+      const rawStart = customStartDate || payrollCycles[0]?.startDate || '';
+      const rawEnd = customEndDate || payrollCycles[0]?.endDate || '';
+      const startDate = rawStart <= rawEnd ? rawStart : rawEnd;
+      const endDate = rawStart <= rawEnd ? rawEnd : rawStart;
+      return {
+        startDate,
+        endDate,
+        label: formatCustomDateRangeLabel(startDate, endDate),
+        isCurrent: false,
+        isCustom: true,
+      };
+    }
+    const found =
+      payrollCycles.find((c) => c.id === selectedPeriodId) || payrollCycles[0];
+    return {
+      startDate: found?.startDate || '',
+      endDate: found?.endDate || '',
+      label: found?.label || payrollCycleLabel,
+      isCurrent: Boolean(found?.isCurrent),
+      isCustom: false,
+    };
+  }, [
+    externalActivePeriodRange,
+    selectedPeriodId,
+    customStartDate,
+    customEndDate,
+    payrollCycles,
+    payrollCycleLabel,
+  ]);
+
+  const canSelectPeriod = useMemo(
+    () => canSelectHistoricalPayrollCycle(currentUser, staffList),
+    [currentUser, staffList]
+  );
 
   const isGlobalViewer = useMemo(
     () => canViewAllAttendance(currentUser),
@@ -108,18 +238,55 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
 
   const todayIsoKey = useMemo(() => toJakartaDateKey(new Date()), []);
 
-  // Dynamically computed attendance logs (Regular Hours vs Overtime >= 20:00) strictly scoped to currently visible filtered rows on screen
+  const periodRangeArg = useMemo(
+    () =>
+      effectivePeriod.startDate && effectivePeriod.endDate
+        ? {
+            startDate: effectivePeriod.startDate,
+            endDate: effectivePeriod.endDate,
+          }
+        : undefined,
+    [effectivePeriod.startDate, effectivePeriod.endDate]
+  );
+
+  // Period-filtered attendance logs strictly scoped to selected payroll cycle / custom date range
+  const periodFilteredAttendanceLogs = useMemo(
+    () =>
+      periodRangeArg
+        ? filterAttendanceLogsByDateRange(
+            attendanceLogs,
+            periodRangeArg.startDate,
+            periodRangeArg.endDate
+          )
+        : attendanceLogs,
+    [attendanceLogs, periodRangeArg]
+  );
+
+  // Dynamically computed attendance logs (Regular Hours vs Overtime >= 20:00) strictly scoped to currently visible filtered rows & selected period
   const exportableLogs = useMemo(
     () =>
       buildTeamDashboardExportLogs(
         currentUser,
-        attendanceLogs,
+        periodFilteredAttendanceLogs,
         staffList,
         'ALL_VISIBLE',
         todayIsoKey,
-        filteredMembers
+        filteredMembers,
+        {
+          startDate: periodRangeArg?.startDate,
+          endDate: periodRangeArg?.endDate,
+          synthesizeMissing: effectivePeriod.isCurrent,
+        }
       ),
-    [currentUser, attendanceLogs, staffList, filteredMembers, todayIsoKey]
+    [
+      currentUser,
+      periodFilteredAttendanceLogs,
+      staffList,
+      filteredMembers,
+      todayIsoKey,
+      periodRangeArg,
+      effectivePeriod.isCurrent,
+    ]
   );
 
   const exportTotals = useMemo(
@@ -136,11 +303,11 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
     };
   }, [filteredMembers, currentUser, isGlobalViewer]);
 
-  // Specific attendance logs for the member opened in detail overlay
+  // Specific attendance logs for the member opened in detail overlay (scoped to selected period)
   const detailMemberLogs = useMemo(() => {
     if (!selectedDetailMember) return [];
     const targetEmailLower = (selectedDetailMember.email || '').trim().toLowerCase();
-    const directLogs = attendanceLogs.filter(
+    const directLogs = periodFilteredAttendanceLogs.filter(
       (l) =>
         l.staffId === selectedDetailMember.staffId ||
         (Boolean(targetEmailLower) &&
@@ -152,15 +319,31 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
       staffList,
       selectedDetailMember.staffId,
       todayIsoKey,
-      [selectedDetailMember]
+      [selectedDetailMember],
+      {
+        startDate: periodRangeArg?.startDate,
+        endDate: periodRangeArg?.endDate,
+        synthesizeMissing: effectivePeriod.isCurrent,
+      }
     );
     return syncAttendanceLogsWithLeave(
       memberExportLogs,
       leaveRecords,
       selectedDetailMember,
-      calendarEvents
+      calendarEvents,
+      periodRangeArg
     );
-  }, [selectedDetailMember, attendanceLogs, currentUser, staffList, leaveRecords, calendarEvents, todayIsoKey]);
+  }, [
+    selectedDetailMember,
+    periodFilteredAttendanceLogs,
+    currentUser,
+    staffList,
+    leaveRecords,
+    calendarEvents,
+    todayIsoKey,
+    periodRangeArg,
+    effectivePeriod.isCurrent,
+  ]);
 
   const detailMemberTotals = useMemo(
     () => calculateAttendanceExportTotals(detailMemberLogs),
@@ -185,29 +368,78 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
       data-testid="team-attendance-dashboard-tab"
-      className="space-y-6"
+      className="space-y-3.5 md:space-y-6"
     >
       {/* Top Header & Prominent Export Controls */}
-      <div className={`p-5 sm:p-6 rounded-2xl ${surfaceCard}`}>
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div className="min-w-0">
-            <h1 className="text-xl sm:text-2xl font-bold font-display tracking-tight break-words">
-              Team Management
-            </h1>
+      <div className={`p-3.5 sm:p-5 md:p-6 rounded-2xl ${surfaceCard}`}>
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 md:gap-4">
+          <div className="flex items-start justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <h1 className="text-lg sm:text-xl md:text-2xl font-bold font-display tracking-tight break-words">
+                Team Management
+              </h1>
+              <div className="flex flex-wrap items-center gap-1.5 md:gap-2 mt-1">
+                <span className="inline-flex items-center gap-1 px-2 md:px-2.5 py-0.5 rounded-md text-[10px] md:text-[11px] font-mono font-semibold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30">
+                  <Calendar className="w-3 h-3 shrink-0" />
+                  <span>{effectivePeriod.label}</span>
+                </span>
+                {!effectivePeriod.isCurrent && (
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                    {effectivePeriod.isCustom ? 'Kustom' : 'Riwayat'}
+                  </span>
+                )}
+                {isLoadingPeriod && (
+                  <span className="inline-flex items-center gap-1 text-[10px] md:text-[11px] font-mono text-slate-400">
+                    <RefreshCw className="w-3 h-3 animate-spin text-[#00B4D8]" />
+                    <span>Memuat...</span>
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Mobile Collapsible Toggle for Period Selector & Export Buttons */}
+            <button
+              type="button"
+              data-testid="mobile-team-controls-toggle"
+              onClick={() => setIsMobileControlsOpen((prev) => !prev)}
+              className={`md:hidden px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border flex items-center gap-1 shrink-0 cursor-pointer ${
+                isMobileControlsOpen
+                  ? 'bg-[#0277BD] text-white border-[#00B4D8]'
+                  : isDark
+                  ? 'bg-slate-900 border-slate-700 text-slate-200'
+                  : 'bg-white border-slate-300 text-slate-800'
+              }`}
+            >
+              <span>Filter &amp; Export</span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 transition-transform ${
+                  isMobileControlsOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
           </div>
 
           {/* Prominent Download PDF & Download Excel Export Buttons */}
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <div
+            className={`${
+              isMobileControlsOpen ? 'grid' : 'hidden md:flex'
+            } grid-cols-2 md:flex md:flex-wrap items-center gap-2 md:gap-2.5 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-slate-700/30`}
+          >
             <button
               type="button"
               disabled={isExporting || exportableLogs.length === 0}
               data-testid="team-dashboard-download-pdf-btn"
               onClick={() =>
-                onDownloadTeamPdf(exportRepresentativeProfile, exportableLogs)
+                onDownloadTeamPdf(
+                  exportRepresentativeProfile,
+                  exportableLogs,
+                  effectivePeriod.label,
+                  periodRangeArg
+                )
               }
-              className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 transition-all flex items-center gap-2 shadow-md disabled:opacity-50 cursor-pointer"
+              className="px-3 md:px-4 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 transition-all flex items-center justify-center gap-1.5 md:gap-2 shadow-md disabled:opacity-50 cursor-pointer"
             >
-              <FileDown className="w-4 h-4 shrink-0" />
+              <FileDown className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>Download PDF</span>
             </button>
 
@@ -216,90 +448,167 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
               disabled={isExporting || exportableLogs.length === 0}
               data-testid="team-dashboard-download-excel-btn"
               onClick={() =>
-                onDownloadTeamExcel(exportRepresentativeProfile, exportableLogs)
+                onDownloadTeamExcel(
+                  exportRepresentativeProfile,
+                  exportableLogs,
+                  effectivePeriod.label,
+                  periodRangeArg
+                )
               }
-              className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition-all flex items-center gap-2 shadow-md disabled:opacity-50 cursor-pointer"
+              className="px-3 md:px-4 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition-all flex items-center justify-center gap-1.5 md:gap-2 shadow-md disabled:opacity-50 cursor-pointer"
             >
-              <FileSpreadsheet className="w-4 h-4 shrink-0" />
+              <FileSpreadsheet className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>Download Excel</span>
             </button>
           </div>
         </div>
 
-        {/* Dynamic KPI Strip (Regular Hours vs Overtime >= 20:00 & Live Team Status) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-5 pt-4 border-t border-slate-700/40">
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] text-slate-400">Personel Tercakup (RBAC)</p>
+        {/* Payroll Cycle Period Selector (Management / Finance / HR / Supervisor) */}
+        {canSelectPeriod && (
+          <div
+            data-testid="team-payroll-period-bar"
+            className={`${
+              isMobileControlsOpen ? 'flex' : 'hidden md:flex'
+            } mt-3 md:mt-4 pt-3 md:pt-3.5 border-t border-slate-700/40 flex-col sm:flex-row sm:items-center gap-2 md:gap-2.5`}
+          >
+            <div className="flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-[#00B4D8] shrink-0" />
+              <label
+                htmlFor="team-payroll-period-select"
+                className="text-[11px] md:text-xs font-semibold text-[#00B4D8] whitespace-nowrap"
+              >
+                Periode Siklus Payroll:
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 flex-1">
+              <select
+                id="team-payroll-period-select"
+                data-testid="team-payroll-period-select"
+                value={selectedPeriodId}
+                onChange={(e) => handleChangePeriodId(e.target.value)}
+                className={`w-full sm:w-auto px-3 py-2 rounded-xl text-xs font-semibold border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                  isDark
+                    ? 'bg-slate-950 border-slate-700 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              >
+                {payrollCycles.map((cycle) => (
+                  <option key={cycle.id} value={cycle.id}>
+                    {cycle.label}
+                    {cycle.isCurrent ? ' (Siklus Aktif)' : ''}
+                  </option>
+                ))}
+                <option value="CUSTOM">Filter Tanggal Kustom...</option>
+              </select>
+
+              {selectedPeriodId === 'CUSTOM' && (
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto">
+                  <input
+                    type="date"
+                    aria-label="Tanggal Mulai Kustom"
+                    data-testid="team-custom-start-date"
+                    value={customStartDate}
+                    onChange={(e) => handleChangeCustomStart(e.target.value)}
+                    className={`w-full sm:w-auto px-2.5 py-1.5 rounded-xl text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                      isDark
+                        ? 'bg-slate-950 border-slate-700 text-white'
+                        : 'bg-white border-slate-300 text-slate-900'
+                    }`}
+                  />
+                  <span className="hidden sm:inline text-xs text-slate-400 font-mono">s/d</span>
+                  <input
+                    type="date"
+                    aria-label="Tanggal Akhir Kustom"
+                    data-testid="team-custom-end-date"
+                    value={customEndDate}
+                    onChange={(e) => handleChangeCustomEnd(e.target.value)}
+                    className={`w-full sm:w-auto px-2.5 py-1.5 rounded-xl text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                      isDark
+                        ? 'bg-slate-950 border-slate-700 text-white'
+                        : 'bg-white border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Dynamic KPI Strip (Compact 2x2 Grid on Mobile < 768px, 4-Column on Desktop) */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 md:gap-3 mt-3.5 md:mt-5 pt-3 md:pt-4 border-t border-slate-700/40">
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[10px] md:text-[11px] text-slate-400 truncate">Personel Tercakup</p>
               <p
                 data-testid="team-dashboard-visible-count"
-                className="text-lg font-bold font-mono text-white mt-0.5 tabular-nums"
+                className="text-base md:text-lg font-bold font-mono text-white mt-0.5 tabular-nums truncate"
               >
-                {filteredMembers.length} Personel
+                {filteredMembers.length} Org
               </p>
-              <p className="text-[11px] font-mono text-[#00B4D8]">
+              <p className="text-[10px] md:text-[11px] font-mono text-[#00B4D8] truncate">
                 {wfoCount} WFO · {wfeCount} WFE
               </p>
             </div>
-            <Users className="w-5 h-5 text-[#00B4D8]" />
+            <Users className="w-4 h-4 md:w-5 md:h-5 text-[#00B4D8] shrink-0" />
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] text-slate-400">
-                1. Total Jam Kerja (Regular Hours)
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[10px] md:text-[11px] text-slate-400 truncate">
+                Total Jam Kerja
               </p>
               <p
                 data-testid="team-dashboard-regular-hours"
-                className="text-lg font-bold font-mono text-[#00B4D8] mt-0.5 tabular-nums"
+                className="text-base md:text-lg font-bold font-mono text-[#00B4D8] mt-0.5 tabular-nums truncate"
               >
                 {exportTotals.totalRegularWorkingHours} Jam
               </p>
-              <p className="text-[10px] font-mono text-slate-400">
-                Akumulasi Reguler (&lt; 20:00 WIB)
+              <p className="text-[10px] font-mono text-slate-400 truncate">
+                Reguler (&lt; 20:00)
               </p>
             </div>
-            <Clock className="w-5 h-5 text-[#00B4D8]" />
+            <Clock className="w-4 h-4 md:w-5 md:h-5 text-[#00B4D8] shrink-0" />
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] text-slate-400">
-                2. Total Jam Lembur (Overtime ≥ 20:00)
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[10px] md:text-[11px] text-slate-400 truncate">
+                Total Jam Lembur
               </p>
               <p
                 data-testid="team-dashboard-overtime-hours"
-                className="text-lg font-bold font-mono text-emerald-400 mt-0.5 tabular-nums"
+                className="text-base md:text-lg font-bold font-mono text-emerald-400 mt-0.5 tabular-nums truncate"
               >
                 {exportTotals.totalOvertimeHours} Jam
               </p>
-              <p className="text-[10px] font-mono text-emerald-400">
-                Kompensasi: {formatIDR(exportTotals.totalOvertimePay)}
+              <p className="text-[10px] font-mono text-emerald-400 truncate">
+                {formatIDR(exportTotals.totalOvertimePay)}
               </p>
             </div>
-            <Sparkles className="w-5 h-5 text-emerald-400" />
+            <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-emerald-400 shrink-0" />
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] text-slate-400">Total Keterlambatan Tim</p>
+          <div className="p-2.5 md:p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/90 flex items-center justify-between gap-2 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[10px] md:text-[11px] text-slate-400 truncate">Keterlambatan Tim</p>
               <p
                 data-testid="team-dashboard-late-minutes"
-                className="text-lg font-bold font-mono text-amber-400 mt-0.5 tabular-nums"
+                className="text-base md:text-lg font-bold font-mono text-amber-400 mt-0.5 tabular-nums truncate"
               >
                 {exportTotals.totalLateMinutes} Menit
               </p>
-              <p className="text-[10px] font-mono text-slate-400">
-                Toleransi Check-In 10:05 WIB
+              <p className="text-[10px] font-mono text-slate-400 truncate">
+                Tol. 10:05 WIB
               </p>
             </div>
-            <CheckCircle2 className="w-5 h-5 text-amber-400" />
+            <CheckCircle2 className="w-4 h-4 md:w-5 md:h-5 text-amber-400 shrink-0" />
           </div>
         </div>
       </div>
 
       {/* Filter Bar & Team Roster / Attendance Table */}
-      <div className={`p-4 sm:p-6 rounded-2xl ${surfaceCard} space-y-4`}>
+      <div className={`p-3.5 sm:p-5 md:p-6 rounded-2xl ${surfaceCard} space-y-3 md:space-y-4`}>
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
             <label
@@ -387,8 +696,12 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {filteredMembers.map((member) => {
+                const memberEmailLower = (member.email || '').trim().toLowerCase();
                 const memberLogs = exportableLogs.filter(
-                  (l) => l.staffId === member.staffId
+                  (l) =>
+                    l.staffId === member.staffId ||
+                    (Boolean(memberEmailLower) &&
+                      (l.email || '').trim().toLowerCase() === memberEmailLower)
                 );
                 const latestLog = memberLogs[0];
                 const regHours = memberLogs.reduce(
@@ -405,6 +718,10 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
                 );
                 const otPay = memberLogs.reduce(
                   (sum, l) => sum + (Number(l.overtimePay) || 0),
+                  0
+                );
+                const periodLateMinutes = memberLogs.reduce(
+                  (sum, l) => sum + (Number(l.lateMinutes) || 0),
                   0
                 );
 
@@ -455,19 +772,40 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
                         </span>
                         <span className="text-[11px] text-slate-400 inline-flex items-center gap-1 truncate max-w-[160px]">
                           <Building2 className="w-3 h-3 shrink-0" />
-                          <span className="truncate">{member.roomName}</span>
+                          <span className="truncate">
+                            {formatRoomDisplayName(member.roomName)}
+                          </span>
                         </span>
                       </div>
                     </td>
 
                     <td className="py-3 px-3 font-mono tabular-nums">
-                      <span className="text-emerald-400 font-semibold">
-                        {latestLog?.checkInTime || member.checkInTime}
-                      </span>
-                      <span className="text-slate-500 mx-1">→</span>
-                      <span className="text-slate-300">
-                        {latestLog?.checkOutTime || '19:00'} WIB
-                      </span>
+                      {latestLog ? (
+                        <div>
+                          <span className="text-emerald-400 font-semibold">
+                            {latestLog.checkInTime}
+                          </span>
+                          <span className="text-slate-500 mx-1">→</span>
+                          <span className="text-slate-300">
+                            {latestLog.checkOutTime || '-'} WIB
+                          </span>
+                          <p className="text-[10px] text-slate-400">
+                            {memberLogs.length} entri · {latestLog.date}
+                          </p>
+                        </div>
+                      ) : effectivePeriod.isCurrent ? (
+                        <>
+                          <span className="text-emerald-400 font-semibold">
+                            {member.checkInTime}
+                          </span>
+                          <span className="text-slate-500 mx-1">→</span>
+                          <span className="text-slate-300">-</span>
+                        </>
+                      ) : (
+                        <span className="text-slate-500 text-[11px]">
+                          0 entri periode ini
+                        </span>
+                      )}
                     </td>
 
                     <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-[#00B4D8]">
@@ -494,12 +832,12 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
                     <td className="py-3 px-3 text-right font-mono tabular-nums">
                       <span
                         className={
-                          member.lateMinutesMonth > 0
+                          periodLateMinutes > 0
                             ? 'text-amber-400 font-bold'
                             : 'text-emerald-400'
                         }
                       >
-                        {member.lateMinutesMonth} mnt
+                        {periodLateMinutes} mnt
                       </span>
                     </td>
                   </tr>
@@ -561,7 +899,14 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
                     type="button"
                     disabled={isExporting}
                     data-testid="personnel-detail-download-pdf-btn"
-                    onClick={() => onDownloadTeamPdf(selectedDetailMember, detailMemberLogs)}
+                    onClick={() =>
+                      onDownloadTeamPdf(
+                        selectedDetailMember,
+                        detailMemberLogs,
+                        effectivePeriod.label,
+                        periodRangeArg
+                      )
+                    }
                     className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
                   >
                     <FileDown className="w-3.5 h-3.5" />
@@ -572,7 +917,14 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
                     type="button"
                     disabled={isExporting}
                     data-testid="personnel-detail-download-excel-btn"
-                    onClick={() => onDownloadTeamExcel(selectedDetailMember, detailMemberLogs)}
+                    onClick={() =>
+                      onDownloadTeamExcel(
+                        selectedDetailMember,
+                        detailMemberLogs,
+                        effectivePeriod.label,
+                        periodRangeArg
+                      )
+                    }
                     className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 flex items-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
                   >
                     <FileSpreadsheet className="w-3.5 h-3.5" />
@@ -593,13 +945,15 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
               {/* Modal Body: Metrics & Detailed Logs */}
               <div className="p-5 sm:p-6 space-y-5">
                 {/* 4 Metrics Strip for this specific user */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 md:gap-3">
                   <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                     <p className="text-[11px] text-slate-400">Status Kehadiran</p>
                     <p className="text-base font-bold font-mono mt-0.5 text-[#00B4D8]">
                       {selectedDetailMember.workMode}
                     </p>
-                    <p className="text-[10px] text-slate-400 mt-0.5">{selectedDetailMember.roomName}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      {formatRoomDisplayName(selectedDetailMember.roomName)}
+                    </p>
                   </div>
 
                   <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
@@ -607,7 +961,9 @@ export const TeamAttendanceDashboardTab: React.FC<TeamAttendanceDashboardTabProp
                     <p className="text-base font-bold font-mono mt-0.5 text-emerald-400">
                       {detailMemberTotals.totalRegularWorkingHours} Jam
                     </p>
-                    <p className="text-[10px] text-slate-400 mt-0.5">Siklus: {payrollCycleLabel}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      Siklus: {effectivePeriod.label}
+                    </p>
                   </div>
 
                   <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>

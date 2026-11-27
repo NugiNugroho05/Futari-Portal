@@ -75,6 +75,10 @@ import {
   calculateLateMinutes,
   calculateOvertime,
   getActivePayrollCycle,
+  getRecentPayrollCycles,
+  formatCustomDateRangeLabel,
+  filterAttendanceLogsByDateRange,
+  canSelectHistoricalPayrollCycle,
   calculatePettyCashSummary,
   formatIDR,
   OVERTIME_RATE_PER_HOUR,
@@ -332,8 +336,68 @@ export default function App() {
   // Attendance & Strict 20:00 Overtime State
   const payrollCycle = useMemo(
     () => getActivePayrollCycle(currentTime),
-    [currentTime]
+    [
+      currentTime.getFullYear(),
+      currentTime.getMonth(),
+      currentTime.getDate(),
+    ]
   );
+  const recentPayrollCycles = useMemo(
+    () => getRecentPayrollCycles(currentTime, 12),
+    [
+      currentTime.getFullYear(),
+      currentTime.getMonth(),
+      currentTime.getDate(),
+    ]
+  );
+  const [selectedPayrollPeriodId, setSelectedPayrollPeriodId] = useState<string>(
+    () => getRecentPayrollCycles(new Date(), 12)[0]?.id || ''
+  );
+  const [customPeriodStartDate, setCustomPeriodStartDate] = useState<string>(
+    () => getActivePayrollCycle(new Date()).startDate
+  );
+  const [customPeriodEndDate, setCustomPeriodEndDate] = useState<string>(
+    () => getActivePayrollCycle(new Date()).endDate
+  );
+  const [isLoadingPeriodAttendance, setIsLoadingPeriodAttendance] =
+    useState<boolean>(false);
+  const [isAttendanceControlsOpen, setIsAttendanceControlsOpen] =
+    useState<boolean>(false);
+
+  const selectedAttendancePeriod = useMemo(() => {
+    if (selectedPayrollPeriodId === 'CUSTOM') {
+      const rawStart = customPeriodStartDate || payrollCycle.startDate;
+      const rawEnd = customPeriodEndDate || payrollCycle.endDate;
+      const startDate = rawStart <= rawEnd ? rawStart : rawEnd;
+      const endDate = rawStart <= rawEnd ? rawEnd : rawStart;
+      return {
+        id: 'CUSTOM',
+        startDate,
+        endDate,
+        label: formatCustomDateRangeLabel(startDate, endDate),
+        isCurrent: false,
+        isCustom: true,
+      };
+    }
+    const matched =
+      recentPayrollCycles.find((c) => c.id === selectedPayrollPeriodId) ||
+      recentPayrollCycles[0];
+    return {
+      id: matched.id,
+      startDate: matched.startDate,
+      endDate: matched.endDate,
+      label: matched.label,
+      isCurrent: matched.isCurrent,
+      isCustom: false,
+    };
+  }, [
+    selectedPayrollPeriodId,
+    customPeriodStartDate,
+    customPeriodEndDate,
+    recentPayrollCycles,
+    payrollCycle.startDate,
+    payrollCycle.endDate,
+  ]);
   const [selectedWorkMode, setSelectedWorkMode] = useState<'WFO' | 'WFE'>('WFO');
   const [checkInInputTime, setCheckInInputTime] = useState<string>(() =>
     formatRealTimeHHMM(new Date())
@@ -757,7 +821,25 @@ export default function App() {
         if (mappedLogs.length === 0 && prev.length > 0) {
           return prev;
         }
-        return mappedLogs;
+        // Preserve any previously fetched historical period logs older than the latest polling window
+        const freshIds = new Set(mappedLogs.map((l) => l.id));
+        let oldestFreshDate = '';
+        for (const l of mappedLogs) {
+          if (l.date && (!oldestFreshDate || l.date < oldestFreshDate)) {
+            oldestFreshDate = l.date;
+          }
+        }
+        const preservedOlder = oldestFreshDate
+          ? prev.filter(
+              (oldLog) =>
+                !freshIds.has(oldLog.id) &&
+                Boolean(oldLog.date) &&
+                oldLog.date < oldestFreshDate
+            )
+          : [];
+        return preservedOlder.length > 0
+          ? [...mappedLogs, ...preservedOlder]
+          : mappedLogs;
       });
 
       // Synchronize the logged-in user's today check-in state across devices (HP & Laptop)
@@ -824,6 +906,76 @@ export default function App() {
       // Preserve current state if offline
     }
   };
+
+  const fetchAttendanceForPeriodFromSupabase = async (
+    startDate: string,
+    endDate: string
+  ) => {
+    if (!startDate || !endDate) return;
+    setIsLoadingPeriodAttendance(true);
+    try {
+      const startIsoWib = `${startDate}T00:00:00+07:00`;
+      const endIsoWib = `${endDate}T23:59:59+07:00`;
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('*')
+        .gte('check_in_time', startIsoWib)
+        .lte('check_in_time', endIsoWib)
+        .order('check_in_time', { ascending: false });
+
+      if (error || !Array.isArray(data)) {
+        return;
+      }
+
+      const mappedPeriodLogs = (data as SupabaseAttendanceRow[]).map((row) =>
+        mapSupabaseAttendanceRowToRecord(row, staffList)
+      );
+
+      setAttendanceLogs((prev) => {
+        const byId = new Map<string, AttendanceRecord>();
+        for (const row of prev) {
+          byId.set(row.id, row);
+        }
+        for (const row of mappedPeriodLogs) {
+          byId.set(row.id, row);
+        }
+        return Array.from(byId.values()).sort((a, b) =>
+          (b.date || '').localeCompare(a.date || '')
+        );
+      });
+    } catch {
+      // Keep existing cached logs if offline
+    } finally {
+      setIsLoadingPeriodAttendance(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !isAuthenticated ||
+      (activeTab !== 'attendance' && activeTab !== 'team_attendance')
+    ) {
+      return;
+    }
+    if (
+      !selectedAttendancePeriod.isCurrent &&
+      selectedAttendancePeriod.startDate &&
+      selectedAttendancePeriod.endDate
+    ) {
+      void fetchAttendanceForPeriodFromSupabase(
+        selectedAttendancePeriod.startDate,
+        selectedAttendancePeriod.endDate
+      );
+    }
+  }, [
+    isAuthenticated,
+    activeTab,
+    selectedAttendancePeriod.id,
+    selectedAttendancePeriod.startDate,
+    selectedAttendancePeriod.endDate,
+    selectedAttendancePeriod.isCurrent,
+    staffList.length,
+  ]);
 
   useEffect(() => {
     if (
@@ -1147,17 +1299,40 @@ export default function App() {
     return currentUser;
   }, [canSeeGlobalAttendanceDropdown, selectedAttendanceTargetId, staffList, currentUser]);
 
-  // Strictly Filtered Attendance Logs for the logged-in user (Global or Team RBAC enforced)
-  const privateUserAttendanceLogs = useMemo(
-    () =>
-      filterAttendanceLogsForUser(
-        currentUser,
-        attendanceLogs,
-        targetAttendanceEmployee.staffId,
-        staffList
-      ),
-    [currentUser, attendanceLogs, targetAttendanceEmployee.staffId, staffList]
+  const canUseHistoricalPeriodFilter = useMemo(
+    () => canSelectHistoricalPayrollCycle(currentUser, staffList),
+    [currentUser, staffList]
   );
+
+  const activePeriodRange = useMemo(
+    () => ({
+      startDate: selectedAttendancePeriod.startDate,
+      endDate: selectedAttendancePeriod.endDate,
+    }),
+    [selectedAttendancePeriod.startDate, selectedAttendancePeriod.endDate]
+  );
+
+  // Strictly Filtered Attendance Logs for the logged-in user (Global or Team RBAC + Selected Payroll Cycle enforced)
+  const privateUserAttendanceLogs = useMemo(() => {
+    const rbacScoped = filterAttendanceLogsForUser(
+      currentUser,
+      attendanceLogs,
+      targetAttendanceEmployee.staffId,
+      staffList
+    );
+    return filterAttendanceLogsByDateRange(
+      rbacScoped,
+      selectedAttendancePeriod.startDate,
+      selectedAttendancePeriod.endDate
+    );
+  }, [
+    currentUser,
+    attendanceLogs,
+    targetAttendanceEmployee.staffId,
+    staffList,
+    selectedAttendancePeriod.startDate,
+    selectedAttendancePeriod.endDate,
+  ]);
 
   // Finance Export Totals (Mba Erlita's Request):
   // 1. Total Jam Kerja (Regular Working Hours)
@@ -3611,10 +3786,11 @@ export default function App() {
         privateUserAttendanceLogs,
         leaveRecords,
         targetAttendanceEmployee,
-        calendarEvents
+        calendarEvents,
+        activePeriodRange
       );
       const result = await exportMonthlyAttendanceReportExcel(
-        payrollCycle.label,
+        selectedAttendancePeriod.label,
         targetAttendanceEmployee,
         syncedLogs,
         isGoogleConnected
@@ -3636,10 +3812,11 @@ export default function App() {
         privateUserAttendanceLogs,
         leaveRecords,
         targetAttendanceEmployee,
-        calendarEvents
+        calendarEvents,
+        activePeriodRange
       );
       const result = await exportMonthlyAttendanceReportPDF(
-        payrollCycle.label,
+        selectedAttendancePeriod.label,
         targetAttendanceEmployee,
         syncedLogs,
         syncToDocs && isGoogleConnected
@@ -3656,7 +3833,9 @@ export default function App() {
 
   const handleDownloadTeamDashboardPDF = async (
     targetEmployee: StaffMemberRecord,
-    logsToExport: AttendanceRecord[]
+    logsToExport: AttendanceRecord[],
+    overridePeriodLabel?: string,
+    overrideDateRange?: { startDate: string; endDate: string }
   ) => {
     setIsExporting(true);
     try {
@@ -3664,10 +3843,11 @@ export default function App() {
         logsToExport,
         leaveRecords,
         targetEmployee,
-        calendarEvents
+        calendarEvents,
+        overrideDateRange || activePeriodRange
       );
       const result = await exportMonthlyAttendanceReportPDF(
-        payrollCycle.label,
+        overridePeriodLabel || selectedAttendancePeriod.label,
         targetEmployee,
         syncedLogs,
         isGoogleConnected
@@ -3684,7 +3864,9 @@ export default function App() {
 
   const handleDownloadTeamDashboardExcel = async (
     targetEmployee: StaffMemberRecord,
-    logsToExport: AttendanceRecord[]
+    logsToExport: AttendanceRecord[],
+    overridePeriodLabel?: string,
+    overrideDateRange?: { startDate: string; endDate: string }
   ) => {
     setIsExporting(true);
     try {
@@ -3692,10 +3874,11 @@ export default function App() {
         logsToExport,
         leaveRecords,
         targetEmployee,
-        calendarEvents
+        calendarEvents,
+        overrideDateRange || activePeriodRange
       );
       const result = await exportMonthlyAttendanceReportExcel(
-        payrollCycle.label,
+        overridePeriodLabel || selectedAttendancePeriod.label,
         targetEmployee,
         syncedLogs,
         isGoogleConnected
@@ -5416,23 +5599,23 @@ export default function App() {
               TAB 1: EXECUTIVE LIVE ATTENDANCE DASHBOARD & VIRTUAL OFFICE
              ================================================================= */}
           {activeTab === 'home' && (
-            <div className="space-y-6">
+            <div className="space-y-3.5 md:space-y-6">
               {/* Executive Header & Key Metrics Strip */}
-              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-                <div>
-                  <p className="text-xs font-semibold text-[#00B4D8]">
+              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 md:gap-4">
+                <div className="min-w-0">
+                  <p className="text-[10px] md:text-xs font-semibold text-[#00B4D8] truncate">
                     {isExecutiveUser
                       ? 'EXECUTIVE COMMAND CENTER · LIVE ATTENDANCE DASHBOARD'
                       : `FUTARI OPERATIONS PORTAL · ${currentUser.divisionLabel.toUpperCase()}`}
                   </p>
-                  <h1 className="text-2xl sm:text-3xl font-bold tracking-tight font-display mt-0.5">
+                  <h1 className="text-lg sm:text-2xl md:text-3xl font-bold tracking-tight font-display mt-0.5 leading-snug break-words">
                     {isExecutiveUser
                       ? `Live Attendance Dashboard — ${currentUser.name}`
                       : `Selamat Datang, ${currentUser.name} (${currentUser.role})`}
                   </h1>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2.5">
+                <div className="grid grid-cols-2 gap-2 w-full md:w-auto md:flex md:flex-wrap md:items-center md:gap-2.5">
                   {activeCurrentUserCheckIn ? (
                     <>
                       <button
@@ -5442,10 +5625,10 @@ export default function App() {
                           setCheckInError('');
                           setIsPhotoModalOpen(true);
                         }}
-                        className="px-3.5 py-2 rounded-lg text-xs font-semibold text-emerald-300 bg-emerald-500/15 border border-emerald-500/40 hover:bg-emerald-500/25 flex items-center gap-1.5 whitespace-nowrap"
+                        className="col-span-2 md:col-span-1 px-3 md:px-3.5 py-2 rounded-lg text-[11px] md:text-xs font-semibold text-emerald-300 bg-emerald-500/15 border border-emerald-500/40 hover:bg-emerald-500/25 flex items-center justify-center md:justify-start gap-1.5 whitespace-nowrap"
                       >
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="truncate">
                           Sudah Check-In ({activeCurrentUserCheckIn.mode} ·{' '}
                           {activeCurrentUserCheckIn.checkInTime} WIB)
                         </span>
@@ -5459,10 +5642,10 @@ export default function App() {
                               type="button"
                               data-testid="dashboard-stop-break-btn"
                               onClick={() => handleSelectBreakMode('none')}
-                              className="px-3.5 py-2 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-amber-600 to-rose-600 hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap shadow-md border border-amber-300/40 cursor-pointer"
+                              className="w-full md:w-auto px-3 md:px-3.5 py-2 rounded-lg text-[11px] md:text-xs font-bold text-white bg-gradient-to-r from-amber-600 to-rose-600 hover:opacity-95 flex items-center justify-center gap-1.5 whitespace-nowrap shadow-md border border-amber-300/40 cursor-pointer"
                             >
-                              <Play className="w-3.5 h-3.5 fill-current" />
-                              <span>
+                              <Play className="w-3.5 h-3.5 fill-current shrink-0" />
+                              <span className="truncate">
                                 Stop Break (
                                 {currentUserBreakStatus === 'eating'
                                   ? 'Eating'
@@ -5479,11 +5662,11 @@ export default function App() {
                               onClick={() =>
                                 setIsBreakMenuOpen((prev) => !prev)
                               }
-                              className="px-3.5 py-2 rounded-lg text-xs font-bold text-slate-950 bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-300 hover:to-orange-300 flex items-center gap-1.5 whitespace-nowrap shadow-md border border-amber-200/60 cursor-pointer"
+                              className="w-full md:w-auto px-3 md:px-3.5 py-2 rounded-lg text-[11px] md:text-xs font-bold text-slate-950 bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-300 hover:to-orange-300 flex items-center justify-center gap-1.5 whitespace-nowrap shadow-md border border-amber-200/60 cursor-pointer"
                             >
-                              <Coffee className="w-3.5 h-3.5" />
+                              <Coffee className="w-3.5 h-3.5 shrink-0" />
                               <span>Break</span>
-                              <ChevronDown className="w-3.5 h-3.5" />
+                              <ChevronDown className="w-3.5 h-3.5 shrink-0" />
                             </button>
                           )}
 
@@ -5496,7 +5679,7 @@ export default function App() {
                                   exit={{ opacity: 0, y: 6, scale: 0.96 }}
                                   transition={{ duration: 0.16 }}
                                   data-testid="dashboard-break-popover"
-                                  className={`absolute right-0 mt-2 w-60 rounded-xl border p-1.5 shadow-2xl z-40 ${
+                                  className={`absolute left-0 md:left-auto md:right-0 mt-2 w-60 rounded-xl border p-1.5 shadow-2xl z-40 ${
                                     isDark
                                       ? 'bg-slate-900/95 border-slate-700 text-slate-100'
                                       : 'bg-white/95 border-slate-200 text-slate-900'
@@ -5586,11 +5769,11 @@ export default function App() {
                           setCheckInError('');
                           setIsPhotoModalOpen(true);
                         }}
-                        className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-rose-600 to-orange-500 hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap shadow-md"
+                        className="px-2.5 md:px-4 py-2 rounded-lg text-[11px] md:text-xs font-semibold text-white bg-gradient-to-r from-rose-600 to-orange-500 hover:opacity-95 flex items-center justify-center gap-1.5 whitespace-nowrap shadow-md"
                       >
-                        <LogOut className="w-3.5 h-3.5" />
-                        <span>
-                          Photo Check-Out ({activeCurrentUserCheckIn.mode})
+                        <LogOut className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">
+                          Check-Out ({activeCurrentUserCheckIn.mode})
                         </span>
                       </button>
                     </>
@@ -5603,84 +5786,91 @@ export default function App() {
                         setCheckInInputTime(formatJakartaTimeHHMM(new Date()));
                         setIsPhotoModalOpen(true);
                       }}
-                      className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-1.5 whitespace-nowrap shadow-md"
+                      className="px-2.5 md:px-4 py-2 rounded-lg text-[11px] md:text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center justify-center gap-1.5 whitespace-nowrap shadow-md"
                     >
-                      <Camera className="w-3.5 h-3.5" />
-                      <span>Photo Check-In (WFO / WFE)</span>
+                      <Camera className="w-3.5 h-3.5 shrink-0" />
+                      <span className="md:hidden">Photo Check-In</span>
+                      <span className="hidden md:inline">Photo Check-In (WFO / WFE)</span>
                     </button>
                   )}
                   <button
                     type="button"
                     onClick={() => setActiveTab('pettycash')}
-                    className={`px-4 py-2 rounded-lg text-xs font-semibold border whitespace-nowrap ${
+                    className={`${
+                      activeCurrentUserCheckIn && activeCurrentUserCheckIn.mode === 'WFO'
+                        ? 'col-span-2 md:col-span-1'
+                        : ''
+                    } px-2.5 md:px-4 py-2 rounded-lg text-[11px] md:text-xs font-semibold border flex items-center justify-center gap-1.5 whitespace-nowrap ${
                       isDark
                         ? 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
                         : 'border-slate-300 bg-white text-slate-800 hover:bg-slate-100'
                     }`}
                   >
-                    Kelola Petty Cash Event
+                    <Wallet className="w-3.5 h-3.5 text-[#00B4D8] shrink-0 md:hidden" />
+                    <span className="md:hidden truncate">Petty Cash Event</span>
+                    <span className="hidden md:inline">Kelola Petty Cash Event</span>
                   </button>
                 </div>
               </div>
 
-              {/* 4-Column KPI Summary Strip (Consistent & Concise Typography) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch">
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+              {/* 4-Column KPI Summary Strip (Compact 2x2 Grid on Mobile < 768px, 4-Column on Desktop) */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 md:gap-4 items-stretch">
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <div className="flex items-center justify-between gap-1.5">
+                    <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                       Active WFO
                     </p>
                     <span
                       data-testid="dashboard-active-wfe-count-badge"
-                      className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30"
+                      className="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30 shrink-0"
                     >
                       {wfeStaffList.length} WFE
                     </span>
                   </div>
-                  <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-[#00B4D8]">
+                  <p className="text-base sm:text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 md:mt-1.5 text-[#00B4D8] leading-tight">
                     {wfoStaffList.length} WFO · {wfeStaffList.length} WFE
                   </p>
-                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
                     Jakarta HQ &amp; Jawa ({staffList.length} Personel)
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Siklus Payroll
                   </p>
-                  <p className="text-base sm:text-lg font-bold font-mono tabular-nums mt-1.5">
+                  <p className="text-xs sm:text-base md:text-lg font-bold font-mono tabular-nums mt-1 md:mt-1.5 leading-snug break-words">
                     {payrollCycle.label}
                   </p>
-                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
-                    Masuk 10:00 · Toleransi 10:05 WIB
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
+                    Masuk 10:00 · Tol. 10:05 WIB
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Total Keterlambatan
                   </p>
-                  <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-amber-500">
+                  <p className="text-base sm:text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 md:mt-1.5 text-amber-500 leading-tight">
                     {isExecutiveUser
                       ? companyTotalLateMinutes
                       : userMonthlyLateMinutes}{' '}
                     Menit
                   </p>
-                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
                     Rekap Bulan Ini
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Saldo Petty Cash
                   </p>
-                  <p className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-emerald-500">
+                  <p className="text-sm sm:text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 md:mt-1.5 text-emerald-500 leading-tight truncate">
                     {formatIDR(pettyCashSummary.remainingBalance)}
                   </p>
-                  <p className={`text-[11px] mt-1.5 ${mutedText}`}>
-                    Dana Approval: {formatIDR(activeEventBudget.approvedBudget)}
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
+                    Approval: {formatIDR(activeEventBudget.approvedBudget)}
                   </p>
                 </div>
               </div>
@@ -5705,20 +5895,20 @@ export default function App() {
               <section
                 aria-labelledby="virtual-office-grid-heading"
                 data-testid="virtual-office-rooms-section"
-                className={`p-6 rounded-xl border ${surfaceCard} space-y-6`}
+                className={`p-3.5 md:p-6 rounded-xl border ${surfaceCard} space-y-3.5 md:space-y-6`}
               >
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-700/30">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 md:gap-3 pb-3 md:pb-4 border-b border-slate-700/30">
                   <h2
                     id="virtual-office-grid-heading"
-                    className="text-lg font-bold font-display"
+                    className="text-sm sm:text-base md:text-lg font-bold font-display"
                   >
                     Virtual Office — Room Grouping &amp; Active WFO / WFE
                   </h2>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                    <span className="px-2.5 py-1 rounded-lg text-[11px] md:text-xs font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                       {wfoStaffList.length} Active WFO
                     </span>
-                    <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30">
+                    <span className="px-2.5 py-1 rounded-lg text-[11px] md:text-xs font-mono font-bold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30">
                       {wfeStaffList.length} Active WFE
                     </span>
                   </div>
@@ -5727,13 +5917,13 @@ export default function App() {
                 {/* 9-Room Grid Layout using Tailwind CSS Grid & Flexbox */}
                 <div
                   data-testid="virtual-office-9-rooms-grid"
-                  className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
+                  className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 md:gap-4"
                 >
                   {virtualOfficeRooms.map((room) => (
                     <div
                       key={room.roomName}
                       data-testid={`virtual-room-card-${room.roomName}`}
-                      className={`p-4 rounded-xl border flex flex-col justify-between transition-colors ${
+                      className={`p-3 md:p-4 rounded-xl border flex flex-col justify-between transition-colors ${
                         isDark
                           ? 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
                           : 'bg-slate-50/80 border-slate-200 hover:border-slate-300'
@@ -5929,150 +6119,276 @@ export default function App() {
               TAB 2: ATTENDANCE (STRICT GLOBAL vs TEAM RBAC, MANDATORY DAILY DESCRIPTION & STRUCTURED PDF)
              ================================================================= */}
           {activeTab === 'attendance' && (
-            <div className="space-y-6">
+            <div className="space-y-3.5 md:space-y-6">
               <div
-                className={`no-print p-4 md:p-6 rounded-2xl border flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 ${surfaceCard}`}
+                className={`no-print p-3.5 md:p-6 rounded-2xl border space-y-3 md:space-y-4 ${surfaceCard}`}
               >
-                <div className="min-w-0 space-y-1">
-                  <h1 className="text-lg md:text-2xl font-bold font-display break-words">
-                    Absensi
-                  </h1>
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 md:gap-4">
+                  <div className="flex items-start justify-between gap-2 min-w-0">
+                    <div className="min-w-0 space-y-1">
+                      <h1 className="text-lg md:text-2xl font-bold font-display break-words">
+                        Absensi
+                      </h1>
+                      <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
+                        <span className="inline-flex items-center gap-1 px-2 md:px-2.5 py-0.5 rounded-md text-[10px] md:text-[11px] font-mono font-semibold bg-[#00B4D8]/15 text-[#00B4D8] border border-[#00B4D8]/30">
+                          <CalendarIcon className="w-3 h-3 shrink-0" />
+                          <span>{selectedAttendancePeriod.label}</span>
+                        </span>
+                        {!selectedAttendancePeriod.isCurrent && (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                            {selectedAttendancePeriod.isCustom
+                              ? 'Kustom'
+                              : 'Riwayat'}
+                          </span>
+                        )}
+                        {isLoadingPeriodAttendance && (
+                          <span className="inline-flex items-center gap-1 text-[10px] md:text-[11px] font-mono text-slate-400">
+                            <RefreshCw className="w-3 h-3 animate-spin text-[#00B4D8]" />
+                            <span>Memuat...</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Mobile Collapsible Accordion Toggle for Filter & Export */}
+                    <button
+                      type="button"
+                      data-testid="mobile-attendance-controls-toggle"
+                      onClick={() =>
+                        setIsAttendanceControlsOpen((prev) => !prev)
+                      }
+                      className={`md:hidden px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border flex items-center gap-1 shrink-0 cursor-pointer ${
+                        isAttendanceControlsOpen
+                          ? 'bg-[#0277BD] text-white border-[#00B4D8]'
+                          : isDark
+                          ? 'bg-slate-900 border-slate-700 text-slate-200'
+                          : 'bg-white border-slate-300 text-slate-800'
+                      }`}
+                    >
+                      <span>Filter &amp; Export</span>
+                      <ChevronDown
+                        className={`w-3.5 h-3.5 transition-transform ${
+                          isAttendanceControlsOpen ? 'rotate-180' : ''
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div
+                    className={`${
+                      isAttendanceControlsOpen ? 'flex' : 'hidden md:flex'
+                    } flex-wrap items-center gap-2 md:gap-2.5 pt-2 md:pt-0 border-t md:border-t-0 border-slate-700/30`}
+                  >
+                    {/* Strict RBAC for Absensi Global Access:
+                        ONLY visible if the currently logged-in user's role strictly matches dev, finance, or executive.
+                        Hidden entirely for all other roles (like Digital, Creative, etc). */}
+                    {canSeeGlobalAttendanceDropdown && (
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 w-full sm:w-auto">
+                        <label
+                          htmlFor="exec-attendance-employee-select"
+                          className="text-[11px] md:text-xs font-semibold text-[#00B4D8] whitespace-nowrap"
+                        >
+                          Pilih Karyawan (Global Access):
+                        </label>
+                        <select
+                          id="exec-attendance-employee-select"
+                          data-testid="exec-attendance-employee-select"
+                          value={targetAttendanceEmployee.staffId}
+                          onChange={(e) =>
+                            setSelectedAttendanceTargetId(e.target.value)
+                          }
+                          className={`w-full sm:w-auto max-w-full sm:max-w-[260px] truncate px-3 py-2 rounded-xl text-xs font-semibold border ${
+                            isDark
+                              ? 'bg-slate-900 border-slate-700 text-white'
+                              : 'bg-white border-slate-300 text-slate-900'
+                          }`}
+                        >
+                          {staffList.map((s) => (
+                            <option key={s.staffId} value={s.staffId}>
+                              {s.name} ({s.role} · Divisi {s.division} - {formatBranchDisplay(s.branch)})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* MBA ERLITA'S REQUEST: Two Distinct Export Buttons ("Download PDF" & "Download Excel") */}
+                    <div className="grid grid-cols-3 gap-1.5 w-full md:w-auto md:flex md:items-center md:gap-2.5">
+                      <button
+                        type="button"
+                        disabled={isExporting}
+                        onClick={handleDownloadAttendancePDF}
+                        data-testid="download-attendance-pdf-btn"
+                        className="px-2.5 md:px-4 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center justify-center gap-1.5 md:gap-2 whitespace-nowrap shrink-0 shadow-md"
+                      >
+                        <FileDown className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
+                        <span className="md:hidden">PDF</span>
+                        <span className="hidden md:inline">Download PDF</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isExporting}
+                        onClick={handleDownloadAttendanceExcel}
+                        data-testid="download-attendance-excel-btn"
+                        className="px-2.5 md:px-4 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex items-center justify-center gap-1.5 md:gap-2 whitespace-nowrap shrink-0 shadow-md"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
+                        <span className="md:hidden">Excel</span>
+                        <span className="hidden md:inline">Download Excel</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsReportViewerOpen(true);
+                          setTimeout(() => window.print(), 150);
+                        }}
+                        className={`px-2.5 md:px-3.5 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold border flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                          isDark
+                            ? 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
+                            : 'border-slate-300 bg-white text-slate-800 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Printer className="w-3.5 h-3.5 md:w-4 md:h-4 text-[#00B4D8] shrink-0" />
+                        <span>Print</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2.5">
-                  {/* Strict RBAC for Absensi Global Access:
-                      ONLY visible if the currently logged-in user's role strictly matches dev, finance, or executive.
-                      Hidden entirely for all other roles (like Digital, Creative, etc). */}
-                  {canSeeGlobalAttendanceDropdown && (
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
+                {/* Payroll Cycle Period Selector (Management / Finance / HR / Supervisor) */}
+                {canUseHistoricalPeriodFilter && (
+                  <div
+                    data-testid="attendance-payroll-period-bar"
+                    className={`${
+                      isAttendanceControlsOpen ? 'flex' : 'hidden md:flex'
+                    } pt-3 border-t border-slate-700/40 flex-col sm:flex-row sm:items-center gap-2 md:gap-2.5`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <CalendarIcon className="w-4 h-4 text-[#00B4D8] shrink-0" />
                       <label
-                        htmlFor="exec-attendance-employee-select"
-                        className="text-xs font-semibold text-[#00B4D8] whitespace-nowrap"
+                        htmlFor="attendance-payroll-period-select"
+                        className="text-[11px] md:text-xs font-semibold text-[#00B4D8] whitespace-nowrap"
                       >
-                        Pilih Karyawan (Global Access):
+                        Periode Siklus Payroll:
                       </label>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 flex-1">
                       <select
-                        id="exec-attendance-employee-select"
-                        data-testid="exec-attendance-employee-select"
-                        value={targetAttendanceEmployee.staffId}
-                        onChange={(e) =>
-                          setSelectedAttendanceTargetId(e.target.value)
-                        }
-                        className={`w-full sm:w-auto max-w-full sm:max-w-[260px] truncate px-3 py-2 rounded-xl text-xs font-semibold border ${
+                        id="attendance-payroll-period-select"
+                        data-testid="attendance-payroll-period-select"
+                        value={selectedPayrollPeriodId}
+                        onChange={(e) => setSelectedPayrollPeriodId(e.target.value)}
+                        className={`w-full sm:w-auto px-3 py-2 rounded-xl text-xs font-semibold border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
                           isDark
                             ? 'bg-slate-900 border-slate-700 text-white'
                             : 'bg-white border-slate-300 text-slate-900'
                         }`}
                       >
-                        {staffList.map((s) => (
-                          <option key={s.staffId} value={s.staffId}>
-                            {s.name} ({s.role} · Divisi {s.division} - {formatBranchDisplay(s.branch)})
+                        {recentPayrollCycles.map((cycle) => (
+                          <option key={cycle.id} value={cycle.id}>
+                            {cycle.label}
+                            {cycle.isCurrent ? ' (Siklus Aktif)' : ''}
                           </option>
                         ))}
+                        <option value="CUSTOM">Filter Tanggal Kustom...</option>
                       </select>
+
+                      {selectedPayrollPeriodId === 'CUSTOM' && (
+                        <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto">
+                          <input
+                            type="date"
+                            aria-label="Tanggal Mulai Kustom Absensi"
+                            data-testid="attendance-custom-start-date"
+                            value={customPeriodStartDate}
+                            onChange={(e) => setCustomPeriodStartDate(e.target.value)}
+                            className={`w-full sm:w-auto px-2.5 py-1.5 rounded-xl text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                              isDark
+                                ? 'bg-slate-900 border-slate-700 text-white'
+                                : 'bg-white border-slate-300 text-slate-900'
+                            }`}
+                          />
+                          <span className="hidden sm:inline text-xs text-slate-400 font-mono">s/d</span>
+                          <input
+                            type="date"
+                            aria-label="Tanggal Akhir Kustom Absensi"
+                            data-testid="attendance-custom-end-date"
+                            value={customPeriodEndDate}
+                            onChange={(e) => setCustomPeriodEndDate(e.target.value)}
+                            className={`w-full sm:w-auto px-2.5 py-1.5 rounded-xl text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                              isDark
+                                ? 'bg-slate-900 border-slate-700 text-white'
+                                : 'bg-white border-slate-300 text-slate-900'
+                            }`}
+                          />
+                        </div>
+                      )}
                     </div>
-                  )}
-
-                  {/* MBA ERLITA'S REQUEST: Two Distinct Export Buttons ("Download PDF" & "Download Excel") */}
-                  <button
-                    type="button"
-                    disabled={isExporting}
-                    onClick={handleDownloadAttendancePDF}
-                    data-testid="download-attendance-pdf-btn"
-                    className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 flex items-center gap-2 whitespace-nowrap shrink-0 shadow-md"
-                  >
-                    <FileDown className="w-4 h-4" />
-                    <span>Download PDF</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isExporting}
-                    onClick={handleDownloadAttendanceExcel}
-                    data-testid="download-attendance-excel-btn"
-                    className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 shadow-md"
-                  >
-                    <FileSpreadsheet className="w-4 h-4" />
-                    <span>Download Excel</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsReportViewerOpen(true);
-                      setTimeout(() => window.print(), 150);
-                    }}
-                    className={`px-3.5 py-2.5 rounded-xl text-xs font-semibold border flex items-center gap-1.5 whitespace-nowrap ${
-                      isDark
-                        ? 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
-                        : 'border-slate-300 bg-white text-slate-800 hover:bg-slate-100'
-                    }`}
-                  >
-                    <Printer className="w-4 h-4 text-[#00B4D8]" />
-                    <span>Print</span>
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
 
               {/* =================================================================
-                  4-COLUMN ATTENDANCE SUMMARY STRIP (Consistent & Concise Typography)
+                  4-COLUMN ATTENDANCE SUMMARY STRIP (Compact 2x2 on Mobile < 768px)
                  ================================================================= */}
               <div
                 data-testid="finance-attendance-totals-strip"
-                className="no-print grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch"
+                className="no-print grid grid-cols-2 lg:grid-cols-4 gap-2.5 md:gap-4 items-stretch"
               >
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Total Jam Kerja
                   </p>
                   <p
                     data-testid="recap-total-regular-hours"
-                    className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-[#00B4D8]"
+                    className="text-lg sm:text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 md:mt-1.5 text-[#00B4D8]"
                   >
                     {attendanceExportTotals.totalRegularHours} Jam
                   </p>
-                  <p className={`text-[11px] mt-1.5 break-words ${mutedText}`}>
-                    Akumulasi Reguler · {targetAttendanceEmployee.name}
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
+                    Reguler · {targetAttendanceEmployee.name}
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Total Jam Lembur
                   </p>
                   <p
                     data-testid="recap-total-overtime-hours"
-                    className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-emerald-500"
+                    className="text-lg sm:text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 md:mt-1.5 text-emerald-500"
                   >
                     {attendanceExportTotals.totalOvertimeHours} Jam
                   </p>
-                  <p className={`text-[11px] mt-1.5 break-words ${mutedText}`}>
-                    Kompensasi: {formatIDR(attendanceExportTotals.totalOvertimePay)}
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
+                    {formatIDR(attendanceExportTotals.totalOvertimePay)}
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Total Keterlambatan
                   </p>
                   <p
                     data-testid="accumulated-late-minutes"
-                    className="text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1.5 text-amber-500"
+                    className="text-lg sm:text-xl md:text-2xl font-bold font-mono tabular-nums mt-1 md:mt-1.5 text-amber-500"
                   >
                     {userMonthlyLateMinutes} Menit
                   </p>
-                  <p className={`text-[11px] mt-1.5 break-words ${mutedText}`}>
-                    Masuk 10:00 · Toleransi 10:05 WIB
+                  <p className={`text-[10px] md:text-[11px] mt-1 md:mt-1.5 truncate ${mutedText}`}>
+                    Masuk 10:00 · Tol. 10:05
                   </p>
                 </div>
 
-                <div className={`p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
-                  <p className={`text-xs font-medium tracking-wide break-words ${mutedText}`}>
+                <div className={`p-3 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}>
+                  <p className={`text-[11px] md:text-xs font-medium tracking-wide truncate ${mutedText}`}>
                     Lokasi Terverifikasi
                   </p>
                   <p
                     data-testid="verified-hq-location-text"
-                    className="text-lg sm:text-xl font-bold font-display mt-1.5 text-[#00B4D8] break-words whitespace-normal"
+                    className="text-sm sm:text-lg md:text-xl font-bold font-display mt-1 md:mt-1.5 text-[#00B4D8] break-words whitespace-normal leading-tight"
                   >
                     {activeCurrentUserCheckIn?.mode === 'WFO'
                       ? 'WFO - HQ'
@@ -6082,17 +6398,17 @@ export default function App() {
                       ? 'WFO - HQ'
                       : 'WFE - Event Venue'}
                   </p>
-                  <p className="text-[11px] font-mono text-emerald-400 mt-1.5">
-                    {attendanceExportTotals.totalHybridDays} Hari Transisi Hybrid (WFO↔WFE)
+                  <p className="text-[10px] md:text-[11px] font-mono text-emerald-400 mt-1 md:mt-1.5 truncate">
+                    {attendanceExportTotals.totalHybridDays} Hari Hybrid
                   </p>
                 </div>
               </div>
 
               {/* Check-In, Hybrid WFO<->WFE & Clock-Out Workbench */}
-              <div className="no-print grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <div className="no-print grid grid-cols-1 lg:grid-cols-12 gap-3.5 md:gap-6">
                 {/* Left: Check-In HTML5 Camera/File Input + Hybrid WFO<->WFE & Clock-Out Controls */}
                 <div
-                  className={`lg:col-span-6 p-4 md:p-6 rounded-xl border space-y-5 min-w-0 ${surfaceCard}`}
+                  className={`lg:col-span-6 p-3.5 md:p-6 rounded-xl border space-y-3.5 md:space-y-5 min-w-0 ${surfaceCard}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <h2 className="text-base font-bold font-display">
@@ -6550,7 +6866,7 @@ export default function App() {
                       {targetAttendanceEmployee.name}
                     </h2>
                     <p className={`text-xs break-words ${mutedText}`}>
-                      Menampilkan {privateUserAttendanceLogs.length} baris absensi milik{' '}
+                      Periode <strong className="font-mono text-[#00B4D8]">{selectedAttendancePeriod.label}</strong> · Menampilkan {privateUserAttendanceLogs.length} baris absensi milik{' '}
                       <strong>{targetAttendanceEmployee.name}</strong> · Total Jam Kerja:{' '}
                       <strong className="font-mono text-[#00B4D8]">
                         {attendanceExportTotals.totalRegularHours} Jam
@@ -6709,33 +7025,33 @@ export default function App() {
               WITH STRICT RBAC, EVENT COMPLETION WORKFLOW & EXCELJS EMBEDDED RECEIPTS
              ================================================================= */}
           {activeTab === 'pettycash' && (
-            <div className="space-y-6">
+            <div className="space-y-3.5 md:space-y-6">
               {/* Top Petty Cash Header & Strict RBAC Badge */}
-              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-semibold text-[#00B4D8]">
-                      PETTY CASH MASTER-DETAIL (pc_events &amp; pc_transactions) · STRICT RBAC · EXCELJS EMBEDDED IMAGES
+              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 md:gap-4">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
+                    <span className="text-[10px] md:text-xs font-semibold text-[#00B4D8]">
+                      PETTY CASH · MASTER-DETAIL
                     </span>
                     <span
                       data-testid="petty-cash-privacy-badge"
-                      className={`px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
+                      className={`px-2 md:px-2.5 py-0.5 rounded-md text-[10px] md:text-[11px] font-semibold border ${
                         hasFullPettyCashAccess
                           ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                           : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
                       }`}
                     >
                       {hasFullPettyCashAccess
-                        ? `Global Access (${currentUser.role} — dev / finance / executive): Melihat Semua ${visibleEventsList.length} Event`
-                        : `Strict RBAC (${currentUser.email}): Hanya Event created_by / authorized_personnel (${visibleEventsList.length} Event)`}
+                        ? `Global Access (${visibleEventsList.length} Event)`
+                        : `Strict RBAC (${visibleEventsList.length} Event)`}
                     </span>
                   </div>
-                  <h1 className="text-2xl font-bold font-display mt-1">
-                    Manajemen Petty Cash Event (Master-Detail) &amp; Laporan Excel
+                  <h1 className="text-lg sm:text-xl md:text-2xl font-bold font-display mt-1 leading-snug break-words">
+                    Manajemen Petty Cash Event &amp; Laporan Excel
                   </h1>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="grid grid-cols-2 gap-2 w-full md:w-auto md:flex md:flex-wrap md:items-center md:gap-3">
                   {/* Create Master Event (`pc_events`) Button */}
                   <button
                     type="button"
@@ -6754,14 +7070,15 @@ export default function App() {
                       setBudgetModalError('');
                       setIsBudgetModalOpen(true);
                     }}
-                    className={`px-4 py-2.5 rounded-xl text-xs font-semibold border flex items-center gap-2 whitespace-nowrap ${
+                    className={`px-2.5 md:px-4 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold border flex items-center justify-center gap-1.5 md:gap-2 whitespace-nowrap ${
                       isDark
                         ? 'border-[#00B4D8] text-[#00B4D8] bg-slate-900 hover:bg-slate-800'
                         : 'border-[#0277BD] text-[#0277BD] bg-white hover:bg-slate-100'
                     }`}
                   >
-                    <PlusCircle className="w-4 h-4" />
-                    <span>Buat Event Baru (Master pc_events)</span>
+                    <PlusCircle className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
+                    <span className="md:hidden">Buat Event</span>
+                    <span className="hidden md:inline">Buat Event Baru (Master pc_events)</span>
                   </button>
 
                   {/* "Download Laporan Petty Cash (Excel)" Button — ALWAYS accessible for authorized users whether event is active or completed */}
@@ -6772,10 +7089,13 @@ export default function App() {
                     }
                     onClick={handleDownloadPettyCashExcel}
                     data-testid="download-petty-cash-excel-btn"
-                    className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 disabled:opacity-50 flex items-center gap-2 whitespace-nowrap shadow-md"
+                    className="px-2.5 md:px-4 py-2 md:py-2.5 rounded-xl text-[11px] md:text-xs font-semibold text-white bg-gradient-to-r from-[#0277BD] to-[#00B4D8] hover:opacity-95 disabled:opacity-50 flex items-center justify-center gap-1.5 md:gap-2 whitespace-nowrap shadow-md"
                   >
-                    <FileSpreadsheet className="w-4 h-4" />
-                    <span>
+                    <FileSpreadsheet className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
+                    <span className="md:hidden">
+                      {isExporting ? 'Exporting...' : 'Download Excel'}
+                    </span>
+                    <span className="hidden md:inline">
                       {isExporting
                         ? 'Generating Excel (.xlsx)...'
                         : 'Download Laporan Petty Cash (Excel)'}
@@ -6789,48 +7109,47 @@ export default function App() {
               {visibleEventsList.length === 0 ? (
                 <div
                   data-testid="petty-cash-no-assigned-events-rbac"
-                  className="p-8 rounded-2xl border border-amber-500/40 bg-amber-500/10 text-center space-y-3"
+                  className="p-5 md:p-8 rounded-2xl border border-amber-500/40 bg-amber-500/10 text-center space-y-2.5 md:space-y-3"
                 >
-                  <Lock className="w-8 h-8 text-amber-400 mx-auto" />
-                  <h2 className="text-base font-bold font-display text-amber-300">
+                  <Lock className="w-7 h-7 md:w-8 md:h-8 text-amber-400 mx-auto" />
+                  <h2 className="text-sm md:text-base font-bold font-display text-amber-300">
                     Belum Ada Event Petty Cash Sesuai Hak Akses Anda
                   </h2>
-                  <p className={`text-xs max-w-xl mx-auto ${mutedText}`}>
+                  <p className={`text-xs max-w-xl mx-auto break-words ${mutedText}`}>
                     Akun <strong>{currentUser.name}</strong> (
-                    <code>{currentUser.email}</code> · Role:{' '}
+                    <code className="break-all">{currentUser.email}</code> · Role:{' '}
                     <strong>{currentUser.role}</strong>) belum memiliki event di{' '}
                     <code>pc_events</code> sebagai <code>created_by</code> maupun
                     di dalam array <code>authorized_personnel</code>. Klik tombol{' '}
-                    <strong>Buat Event Baru (Master pc_events)</strong> di atas
-                    untuk membuat event baru dan memilih personel yang diotorisasi.
+                    <strong>Buat Event</strong> di atas untuk membuat event baru.
                   </p>
                 </div>
               ) : (
                 <>
                   {/* Master Event Selector (`Pilih Event`), Completion Button (`Tandai Event Selesai`) & Summary Cards */}
-                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 md:gap-4 items-stretch">
                     <div
-                      className={`lg:col-span-6 p-5 rounded-xl border flex flex-col justify-between ${surfaceCard}`}
+                      className={`lg:col-span-6 p-3.5 md:p-5 rounded-xl border flex flex-col justify-between min-w-0 ${surfaceCard}`}
                     >
-                      <div className="space-y-3">
+                      <div className="space-y-2.5 md:space-y-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <label
                             htmlFor="active-event-select"
-                            className="block text-xs font-semibold text-[#00B4D8]"
+                            className="block text-[11px] md:text-xs font-semibold text-[#00B4D8]"
                           >
-                            Pilih Event (Aktif &amp; Selesai — Sesuai RBAC):
+                            Pilih Event (Aktif &amp; Selesai):
                           </label>
                           <span
                             data-testid="pc-event-status-badge"
-                            className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                            className={`px-2 md:px-2.5 py-0.5 rounded-full text-[10px] md:text-[11px] font-bold border ${
                               activeEventBudget.is_completed
                                 ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                                 : 'bg-sky-500/20 text-sky-300 border-sky-500/40'
                             }`}
                           >
                             {activeEventBudget.is_completed
-                              ? '✓ EVENT SELESAI (COMPLETED / LOCKED)'
-                              : '● EVENT AKTIF (OPEN FOR RECEIPTS)'}
+                              ? '✓ EVENT SELESAI'
+                              : '● EVENT AKTIF'}
                           </span>
                         </div>
 
@@ -6851,7 +7170,7 @@ export default function App() {
                               setExpenseInvolvedStaffIds(found.involvedStaffIds);
                             }
                           }}
-                          className={`w-full px-3 py-2.5 rounded-lg text-xs font-semibold border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
+                          className={`w-full px-3 py-2 md:py-2.5 rounded-lg text-xs font-semibold border focus:outline-none focus:ring-2 focus:ring-[#00B4D8] ${
                             isDark
                               ? 'bg-slate-950 border-slate-700 text-white'
                               : 'bg-slate-50 border-slate-300 text-slate-900'
@@ -6868,11 +7187,11 @@ export default function App() {
                       </div>
 
                       <div
-                        className={`mt-3 pt-3 border-t border-slate-700/30 text-xs space-y-2 ${mutedText}`}
+                        className={`mt-2.5 md:mt-3 pt-2.5 md:pt-3 border-t border-slate-700/30 text-xs space-y-2 ${mutedText}`}
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <p>
-                            <strong>Dibuat Oleh (created_by):</strong>{' '}
+                          <p className="text-[11px] md:text-xs break-all">
+                            <strong>Dibuat Oleh:</strong>{' '}
                             <code className="text-[#00B4D8]">
                               {activeEventBudget.created_by || currentUser.email}
                             </code>
@@ -6883,7 +7202,7 @@ export default function App() {
                               disabled={isCompletingPcEvent}
                               onClick={handleMarkEventCompleted}
                               data-testid="mark-event-completed-btn"
-                              className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 flex items-center gap-1.5 shadow-sm transition-colors"
+                              className="px-3 md:px-3.5 py-1.5 rounded-lg text-[11px] md:text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 flex items-center gap-1.5 shadow-sm transition-colors"
                             >
                               <CheckCircle2 className="w-3.5 h-3.5" />
                               <span>
@@ -6895,12 +7214,12 @@ export default function App() {
                           ) : (
                             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400">
                               <Lock className="w-3.5 h-3.5" />
-                              <span>is_completed = true (Terkunci)</span>
+                              <span>Terkunci (Selesai)</span>
                             </span>
                           )}
                         </div>
-                        <p className="text-[11px] text-[#00B4D8] break-words">
-                          <strong>Authorized Personnel (JSONB Emails):</strong>{' '}
+                        <p className="text-[10px] md:text-[11px] text-[#00B4D8] break-words">
+                          <strong>Authorized Personnel:</strong>{' '}
                           {activeEventBudget.authorized_personnel &&
                           activeEventBudget.authorized_personnel.length > 0
                             ? activeEventBudget.authorized_personnel.join(', ')
@@ -6909,47 +7228,46 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* 3 Financial Metrics Summary Cards: Dana Approval, Total Pengeluaran, Sisa Saldo / Sisa Dana Dikembalikan ke Kantor */}
-                    <div className="lg:col-span-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    {/* 3 Financial Metrics Summary Cards (Compact 2-Col + Full-Width Balance on Mobile < 768px) */}
+                    <div className="lg:col-span-6 grid grid-cols-2 sm:grid-cols-3 gap-2.5 md:gap-4">
                       {/* Card 1: Dana Approval (`approved_budget` from `pc_events`) */}
-                      <div className={`p-5 rounded-xl border ${surfaceCard}`}>
-                        <p className={`text-xs font-medium ${mutedText}`}>
+                      <div className={`p-3 md:p-5 rounded-xl border min-w-0 ${surfaceCard}`}>
+                        <p className={`text-[11px] md:text-xs font-medium truncate ${mutedText}`}>
                           Dana Approval
                         </p>
                         <p
                           data-testid="approved-budget-display"
-                          className="text-lg font-bold font-mono tabular-nums mt-1 text-[#00B4D8]"
+                          className="text-sm sm:text-base md:text-lg font-bold font-mono tabular-nums mt-1 text-[#00B4D8] truncate"
                         >
                           {formatIDR(pettyCashSummary.approvedBudget)}
                         </p>
-                        <p className={`text-[11px] mt-1 ${mutedText}`}>
-                          Plafon Awal (approved_budget)
+                        <p className={`text-[10px] md:text-[11px] mt-1 truncate ${mutedText}`}>
+                          Plafon Awal
                         </p>
                       </div>
 
                       {/* Card 2: Total Pengeluaran (Sum of `amount` from `pc_transactions`) */}
-                      <div className={`p-5 rounded-xl border ${surfaceCard}`}>
-                        <p className={`text-xs font-medium ${mutedText}`}>
+                      <div className={`p-3 md:p-5 rounded-xl border min-w-0 ${surfaceCard}`}>
+                        <p className={`text-[11px] md:text-xs font-medium truncate ${mutedText}`}>
                           Total Pengeluaran
                         </p>
                         <p
                           data-testid="total-spent-display"
-                          className="text-lg font-bold font-mono tabular-nums mt-1 text-amber-500"
+                          className="text-sm sm:text-base md:text-lg font-bold font-mono tabular-nums mt-1 text-amber-500 truncate"
                         >
                           {formatIDR(pettyCashSummary.totalSpent)}
                         </p>
                         <p
-                          className={`text-[11px] mt-1 font-mono tabular-nums ${mutedText}`}
+                          className={`text-[10px] md:text-[11px] mt-1 font-mono tabular-nums truncate ${mutedText}`}
                         >
-                          {activeEventExpenses.length} Struk · Utilisasi{' '}
-                          {pettyCashSummary.utilizationPercent}%
+                          {activeEventExpenses.length} Struk · {pettyCashSummary.utilizationPercent}%
                         </p>
                       </div>
 
                       {/* Card 3: Sisa Saldo OR 'Sisa Dana Dikembalikan ke Kantor' (Refund to Office) when `is_completed === true` */}
                       <div
                         data-testid="remaining-balance-card"
-                        className={`p-5 rounded-xl border transition-all ${
+                        className={`col-span-2 sm:col-span-1 p-3 md:p-5 rounded-xl border min-w-0 transition-all ${
                           activeEventBudget.is_completed
                             ? 'bg-emerald-500/15 border-2 border-emerald-400 shadow-lg shadow-emerald-500/10'
                             : surfaceCard
@@ -6958,7 +7276,7 @@ export default function App() {
                         <div className="flex items-center justify-between gap-1">
                           <p
                             data-testid="remaining-balance-label"
-                            className={`text-xs font-bold ${
+                            className={`text-[11px] md:text-xs font-bold truncate ${
                               activeEventBudget.is_completed
                                 ? 'text-emerald-300'
                                 : mutedText
@@ -6976,7 +7294,7 @@ export default function App() {
                         </div>
                         <p
                           data-testid="remaining-balance-display"
-                          className={`text-lg font-bold font-mono tabular-nums mt-1 ${
+                          className={`text-base md:text-lg font-bold font-mono tabular-nums mt-1 truncate ${
                             activeEventBudget.is_completed
                               ? 'text-emerald-300'
                               : pettyCashSummary.remainingBalance < 0
@@ -6987,7 +7305,7 @@ export default function App() {
                           {formatIDR(pettyCashSummary.remainingBalance)}
                         </p>
                         <p
-                          className={`text-[11px] mt-1 ${
+                          className={`text-[10px] md:text-[11px] mt-1 truncate ${
                             activeEventBudget.is_completed
                               ? 'text-emerald-200/90 font-semibold'
                               : mutedText
@@ -7002,11 +7320,11 @@ export default function App() {
                   </div>
 
                   {/* Detail Section: Left = Input Receipt Form (or Locked Card if is_completed === true), Right = Transactions Table */}
-                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 md:gap-6">
                     {activeEventBudget.is_completed ? (
                       <div
                         data-testid="petty-cash-event-completed-locked"
-                        className={`lg:col-span-5 p-6 rounded-xl border flex flex-col items-center justify-center text-center space-y-4 ${surfaceCard}`}
+                        className={`lg:col-span-5 p-4 md:p-6 rounded-xl border flex flex-col items-center justify-center text-center space-y-3 md:space-y-4 min-w-0 ${surfaceCard}`}
                       >
                         <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
                           <Lock className="w-6 h-6" />
@@ -7067,7 +7385,7 @@ export default function App() {
                     ) : (
                       <form
                         onSubmit={handleAddPettyCashExpense}
-                        className={`lg:col-span-5 p-6 rounded-xl border space-y-4 ${surfaceCard}`}
+                        className={`lg:col-span-5 p-3.5 md:p-6 rounded-xl border space-y-3 md:space-y-4 min-w-0 ${surfaceCard}`}
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div>
@@ -7313,7 +7631,7 @@ export default function App() {
 
                     {/* Right: Petty Cash Detail Transactions Table (`pc_transactions` for selected `event_id`) */}
                     <div
-                      className={`lg:col-span-7 p-6 rounded-xl border ${surfaceCard}`}
+                      className={`lg:col-span-7 p-3.5 md:p-6 rounded-xl border min-w-0 ${surfaceCard}`}
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
                         <div>
@@ -7461,7 +7779,16 @@ export default function App() {
               currentUser={currentUser}
               staffList={effectiveOfficeStaffList}
               attendanceLogs={attendanceLogs}
-              payrollCycleLabel={payrollCycle.label}
+              payrollCycleLabel={selectedAttendancePeriod.label}
+              payrollCycles={recentPayrollCycles}
+              selectedPeriodId={selectedPayrollPeriodId}
+              onSelectPeriodId={setSelectedPayrollPeriodId}
+              customStartDate={customPeriodStartDate}
+              customEndDate={customPeriodEndDate}
+              onChangeCustomStartDate={setCustomPeriodStartDate}
+              onChangeCustomEndDate={setCustomPeriodEndDate}
+              activePeriodRange={selectedAttendancePeriod}
+              isLoadingPeriod={isLoadingPeriodAttendance}
               onDownloadTeamPdf={handleDownloadTeamDashboardPDF}
               onDownloadTeamExcel={handleDownloadTeamDashboardExcel}
               isExporting={isExporting}
@@ -7727,12 +8054,13 @@ export default function App() {
         isOpen={isReportViewerOpen}
         onClose={() => setIsReportViewerOpen(false)}
         employee={targetAttendanceEmployee}
-        periodLabel={payrollCycle.label}
+        periodLabel={selectedAttendancePeriod.label}
         logs={syncAttendanceLogsWithLeave(
           privateUserAttendanceLogs,
           leaveRecords,
           targetAttendanceEmployee,
-          calendarEvents
+          calendarEvents,
+          activePeriodRange
         )}
         isDark={isDark}
         onDownloadHtmlPdfFile={() => handleConfirmStructuredPdfDownload(false)}
